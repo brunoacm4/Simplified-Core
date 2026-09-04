@@ -1,0 +1,48 @@
+# PANIC -- RAN e UE simulados (UERANSIM).
+#
+# Separado do core porque tera vidas diferentes: mais a frente vamos querer
+# variar o numero de UEs, ou trocar o UERANSIM pelo PacketRusher para carga,
+# sem tocar no core.
+
+services:
+
+  gnb:
+    image: panic/ueransim:${UERANSIM_TAG}
+    container_name: panic-gnb
+    restart: "no"
+    command: ["nr-gnb", "-c", "/etc/ueransim/gnb.yaml"]
+    volumes: ["../configs/ueransim/gnb.yaml:/etc/ueransim/gnb.yaml:ro"]
+    networks:
+      net-n2n3: { ipv4_address: "${IP_GNB_N2N3}" }
+      net-uu:   { ipv4_address: "${IP_GNB_RADIO}" }
+    depends_on:
+      amf: { condition: service_healthy }
+      upf: { condition: service_healthy }
+    healthcheck:
+      # SCTP estabelecido com o AMF: e a prova de que a N2 esta de pe.
+      test: ["CMD-SHELL", "ss -na | grep -q '${IP_AMF_NGAP}:38412'"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 3s
+
+  ue:
+    image: panic/ueransim:${UERANSIM_TAG}
+    container_name: panic-ue
+    restart: "no"
+    command: ["nr-ue", "-c", "/etc/ueransim/ue.yaml"]
+    volumes: ["../configs/ueransim/ue.yaml:/etc/ueransim/ue.yaml:ro"]
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    networks:
+      net-uu: { ipv4_address: "${IP_UE}" }
+    depends_on:
+      gnb: { condition: service_healthy }
+    healthcheck:
+      # uesimtun0 so existe depois de registo + sessao PDU concluidos com
+      # sucesso. E portanto o teste ponta-a-ponta do plano de controlo inteiro.
+      test: ["CMD-SHELL", "ip addr show uesimtun0 | grep -q 'inet '"]
+      interval: 2s
+      timeout: 2s
+      retries: 45
+      start_period: 5s

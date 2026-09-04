@@ -1,0 +1,22 @@
+# UDM -- gestao unificada de dados. Gera vetores de autenticacao e serve os
+# dados de subscricao ao AMF e ao SMF.
+logger:
+  level: info
+
+global:
+
+udm:
+  hnet:
+    - id: 1
+      scheme: 1
+      key: /opt/open5gs/etc/open5gs/hnet/curve25519-1.key
+    - id: 2
+      scheme: 2
+      key: /opt/open5gs/etc/open5gs/hnet/secp256r1-2.key
+  sbi:
+    server:
+      - address: 10.55.0.21
+        port: 7777
+    client:
+      scp:
+        - uri: http://10.55.0.11:7777

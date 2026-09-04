@@ -1,0 +1,20 @@
+# NSSF -- selecao de network slice.
+# Com um unico slice (SST=1) esta NF e quase inteiramente redundante. Fica no
+# baseline porque queremos MEDIR essa redundancia, e nao assumi-la.
+logger:
+  level: info
+
+global:
+
+nssf:
+  sbi:
+    server:
+      - address: 10.55.0.24
+        port: 7777
+    client:
+      scp:
+        - uri: http://10.55.0.11:7777
+      nsi:
+        - uri: http://10.55.0.10:7777
+          s_nssai:
+            sst: 1

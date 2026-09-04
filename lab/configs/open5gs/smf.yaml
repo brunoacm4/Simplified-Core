@@ -1,0 +1,41 @@
+# SMF -- Session Management Function.
+# Estabelece sessoes PDU e controla o UPF via PFCP (N4).
+
+logger:
+  level: info
+
+global:
+
+smf:
+  sbi:
+    server:
+      - address: 10.55.0.31
+        port: 7777
+    client:
+      scp:
+        - uri: http://10.55.0.11:7777
+  pfcp:
+    server:
+      - address: 10.55.2.31
+    client:
+      upf:
+        - address: 10.55.2.40
+  gtpu:
+    server:
+      - address: 10.55.2.31
+  metrics:
+    server:
+      - address: 10.55.0.31
+        port: 9090
+
+  session:
+    - subnet: 10.45.0.0/16
+      gateway: 10.45.0.1
+
+  dns:
+    - 8.8.8.8
+    - 1.1.1.1
+
+  # 1400 e nao 1500: compensa o encapsulamento GTP-U sobre uma bridge Docker de
+  # MTU 1500. Sem isto ha fragmentacao e as medicoes de plano de dados mentem.
+  mtu: 1400

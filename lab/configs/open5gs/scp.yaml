@@ -1,0 +1,20 @@
+# SCP -- Service Communication Proxy.
+#
+# Deliberadamente MANTIDO no baseline. O Open5GS usa por omissao comunicacao
+# indireta (Modelo D), em que todas as chamadas SBI passam por aqui em vez de
+# irem diretamente de NF para NF. Isso duplica o numero de transacoes HTTP/2 por
+# procedimento -- e e exatamente o tipo de custo que a tese quer quantificar.
+# Desligar o SCP e uma experiencia futura, nao um atalho de agora.
+logger:
+  level: info
+
+global:
+
+scp:
+  sbi:
+    server:
+      - address: 10.55.0.11
+        port: 7777
+    client:
+      nrf:
+        - uri: http://10.55.0.10:7777

@@ -1,0 +1,14 @@
+# AUSF -- servidor de autenticacao. Participa no 5G-AKA durante o registo.
+logger:
+  level: info
+
+global:
+
+ausf:
+  sbi:
+    server:
+      - address: 10.55.0.20
+        port: 7777
+    client:
+      scp:
+        - uri: http://10.55.0.11:7777

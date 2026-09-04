@@ -1,0 +1,23 @@
+# gNB simulado (UERANSIM).
+# Os valores de PLMN/TAC/slice TEM de coincidir com amf.yaml -- verificado por
+# lab/scripts/check-params.sh.
+
+mcc: '999'
+mnc: '70'
+
+nci: '0x000000010'      # NR Cell Identity
+idLength: 32            # comprimento do gNB ID dentro do NCI
+tac: 1
+
+linkIp: 10.55.3.50      # radio simulado, para o UE  (net-uu)
+ngapIp: 10.55.1.50      # N2, para o AMF             (net-n2n3)
+gtpIp:  10.55.1.50      # N3, para o UPF             (net-n2n3)
+
+amfConfigs:
+  - address: 10.55.1.30
+    port: 38412
+
+slices:
+  - sst: 1
+
+ignoreStreamIds: true

@@ -1,0 +1,238 @@
+# PANIC -- core 5G baseline (Open5GS), nao modificado.
+#
+# Os IPs vem todos de lab/params.env: o Makefile passa --env-file, logo nao ha
+# valores duplicados entre este ficheiro e a fonte de verdade.
+#
+# Redes separadas por interface 3GPP para que cada captura seja limpa e
+# atribuivel. Todas internas excepto net-n6 -- assim nenhum trafego externo
+# contamina as medicoes, e a rota por omissao dos containers e deterministica.
+
+x-open5gs: &open5gs
+  image: panic/open5gs:${OPEN5GS_TAG}
+  restart: "no"
+
+networks:
+  net-sbi:
+    name: panic-sbi
+    internal: true
+    ipam: { config: [{ subnet: 10.55.0.0/24 }] }
+  net-n2n3:
+    name: panic-n2n3
+    internal: true
+    ipam: { config: [{ subnet: 10.55.1.0/24 }] }
+  net-n4:
+    name: panic-n4
+    internal: true
+    ipam: { config: [{ subnet: 10.55.2.0/24 }] }
+  net-uu:
+    name: panic-uu
+    internal: true
+    ipam: { config: [{ subnet: 10.55.3.0/24 }] }
+  net-n6:
+    name: panic-n6
+    ipam: { config: [{ subnet: 10.55.4.0/24 }] }
+
+services:
+
+  # --------------------------------------------------------------- dados
+  mongo:
+    image: mongo:7.0
+    container_name: panic-mongo
+    restart: "no"
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      net-sbi: { ipv4_address: "${IP_MONGO}" }
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' | grep -q 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  # ------------------------------------------------- registo e proxy SBI
+  nrf:
+    <<: *open5gs
+    container_name: panic-nrf
+    command: ["open5gs-nrfd", "-c", "/etc/open5gs/nrf.yaml"]
+    volumes: ["../configs/open5gs/nrf.yaml:/etc/open5gs/nrf.yaml:ro"]
+    networks:
+      net-sbi: { ipv4_address: "${IP_NRF}" }
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z ${IP_NRF} 7777"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  scp:
+    <<: *open5gs
+    container_name: panic-scp
+    command: ["open5gs-scpd", "-c", "/etc/open5gs/scp.yaml"]
+    volumes: ["../configs/open5gs/scp.yaml:/etc/open5gs/scp.yaml:ro"]
+    networks:
+      net-sbi: { ipv4_address: "${IP_SCP}" }
+    depends_on:
+      nrf: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z ${IP_SCP} 7777"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # ----------------------------------------------------- dados e politica
+  udr:
+    <<: *open5gs
+    container_name: panic-udr
+    command: ["open5gs-udrd", "-c", "/etc/open5gs/udr.yaml"]
+    volumes: ["../configs/open5gs/udr.yaml:/etc/open5gs/udr.yaml:ro"]
+    networks:
+      net-sbi: { ipv4_address: "${IP_UDR}" }
+    depends_on:
+      mongo: { condition: service_healthy }
+      scp: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z ${IP_UDR} 7777"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  udm:
+    <<: *open5gs
+    container_name: panic-udm
+    command: ["open5gs-udmd", "-c", "/etc/open5gs/udm.yaml"]
+    volumes: ["../configs/open5gs/udm.yaml:/etc/open5gs/udm.yaml:ro"]
+    networks:
+      net-sbi: { ipv4_address: "${IP_UDM}" }
+    depends_on:
+      udr: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z ${IP_UDM} 7777"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  ausf:
+    <<: *open5gs
+    container_name: panic-ausf
+    command: ["open5gs-ausfd", "-c", "/etc/open5gs/ausf.yaml"]
+    volumes: ["../configs/open5gs/ausf.yaml:/etc/open5gs/ausf.yaml:ro"]
+    networks:
+      net-sbi: { ipv4_address: "${IP_AUSF}" }
+    depends_on:
+      udm: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z ${IP_AUSF} 7777"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  pcf:
+    <<: *open5gs
+    container_name: panic-pcf
+    command: ["open5gs-pcfd", "-c", "/etc/open5gs/pcf.yaml"]
+    volumes: ["../configs/open5gs/pcf.yaml:/etc/open5gs/pcf.yaml:ro"]
+    networks:
+      net-sbi: { ipv4_address: "${IP_PCF}" }
+    depends_on:
+      udr: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z ${IP_PCF} 7777"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  nssf:
+    <<: *open5gs
+    container_name: panic-nssf
+    command: ["open5gs-nssfd", "-c", "/etc/open5gs/nssf.yaml"]
+    volumes: ["../configs/open5gs/nssf.yaml:/etc/open5gs/nssf.yaml:ro"]
+    networks:
+      net-sbi: { ipv4_address: "${IP_NSSF}" }
+    depends_on:
+      scp: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z ${IP_NSSF} 7777"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  bsf:
+    <<: *open5gs
+    container_name: panic-bsf
+    command: ["open5gs-bsfd", "-c", "/etc/open5gs/bsf.yaml"]
+    volumes: ["../configs/open5gs/bsf.yaml:/etc/open5gs/bsf.yaml:ro"]
+    networks:
+      net-sbi: { ipv4_address: "${IP_BSF}" }
+    depends_on:
+      mongo: { condition: service_healthy }
+      scp: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z ${IP_BSF} 7777"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # ------------------------------------------------------ core do trabalho
+  amf:
+    <<: *open5gs
+    container_name: panic-amf
+    command: ["open5gs-amfd", "-c", "/etc/open5gs/amf.yaml"]
+    volumes: ["../configs/open5gs/amf.yaml:/etc/open5gs/amf.yaml:ro"]
+    networks:
+      net-sbi:  { ipv4_address: "${IP_AMF_SBI}" }
+      net-n2n3: { ipv4_address: "${IP_AMF_NGAP}" }
+    depends_on:
+      ausf: { condition: service_healthy }
+      nssf: { condition: service_healthy }
+    healthcheck:
+      # SBI ativo E SCTP/NGAP a escutar em 38412 -- as duas metades do AMF.
+      test: ["CMD-SHELL", "nc -z ${IP_AMF_SBI} 7777 && ss -lna | grep -q ':38412'"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  smf:
+    <<: *open5gs
+    container_name: panic-smf
+    command: ["open5gs-smfd", "-c", "/etc/open5gs/smf.yaml"]
+    volumes: ["../configs/open5gs/smf.yaml:/etc/open5gs/smf.yaml:ro"]
+    networks:
+      net-sbi: { ipv4_address: "${IP_SMF_SBI}" }
+      net-n4:  { ipv4_address: "${IP_SMF_PFCP}" }
+    depends_on:
+      pcf: { condition: service_healthy }
+      upf: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z ${IP_SMF_SBI} 7777"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  upf:
+    <<: *open5gs
+    container_name: panic-upf
+    entrypoint: ["/bin/sh", "/opt/panic/upf-entrypoint.sh"]
+    volumes:
+      - "../configs/open5gs/upf.yaml:/etc/open5gs/upf.yaml:ro"
+      - "../scripts/upf-entrypoint.sh:/opt/panic/upf-entrypoint.sh:ro"
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    # ip_forward nao pode ser posto por sysctl -w dentro do container (/proc/sys
+    # esta read-only); tem de vir daqui.
+    sysctls:
+      net.ipv4.ip_forward: 1
+    networks:
+      # priority alta em net-n6 fixa a rota por omissao: o trafego do UE sai
+      # deterministicamente por N6 e nao por uma rede escolhida ao acaso.
+      net-n6:   { ipv4_address: 10.55.4.40, priority: 1000 }
+      net-n2n3: { ipv4_address: "${IP_UPF_GTPU}", priority: 10 }
+      net-n4:   { ipv4_address: "${IP_UPF_PFCP}", priority: 10 }
+    healthcheck:
+      test: ["CMD-SHELL", "ip link show ogstun >/dev/null 2>&1 && ss -lna | grep -q ':8805'"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  mongo-data:
+    name: panic-mongo-data

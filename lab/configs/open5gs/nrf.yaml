@@ -1,0 +1,17 @@
+# NRF -- repositorio de funcoes de rede.
+# Ponto de registo e descoberta de todas as NFs. No baseline mantemo-lo tal como
+# vem: a descoberta dinamica e precisamente um dos custos que queremos medir.
+logger:
+  level: info
+
+global:
+
+nrf:
+  serving:
+    - plmn_id:
+        mcc: 999
+        mnc: 70
+  sbi:
+    server:
+      - address: 10.55.0.10
+        port: 7777

@@ -1,0 +1,65 @@
+# PANIC -- captura de pacotes.
+#
+# DECISAO NAO OBVIA: uma bridge Docker NAO e um hub. Um container "sniffer"
+# ligado a rede nao ve o trafego unicast entre os outros containers -- so
+# broadcast e o que lhe e endereçado. Ligar um tcpdump a net-sbi daria uma
+# captura quase vazia, e demoraria a perceber porque.
+#
+# A solucao e cada sidecar PARTILHAR O NAMESPACE DE REDE da NF-alvo
+# (network_mode: "service:<nf>"). Ve entao exatamente o que aquela NF envia e
+# recebe, em todas as interfaces dela. Como todos os containers partilham o
+# relogio do host, os timestamps sao comparaveis entre ficheiros -- e e isso que
+# permitira, no passo 2, decompor a latencia de um procedimento por interface.
+
+x-cap: &cap
+  image: panic/open5gs:${OPEN5GS_TAG}
+  restart: "no"
+  cap_add: [NET_ADMIN, NET_RAW]
+  volumes:
+    - "../../results/pcap:/pcap"
+
+services:
+
+  cap-amf:
+    <<: *cap
+    container_name: panic-cap-amf
+    network_mode: "service:amf"
+    depends_on: [amf]
+    command: ["/bin/sh", "-c", "mkdir -p /pcap/${RUN_ID} && exec tcpdump -i any -s 0 -U -w /pcap/${RUN_ID}/amf.pcap"]
+
+  cap-smf:
+    <<: *cap
+    container_name: panic-cap-smf
+    network_mode: "service:smf"
+    depends_on: [smf]
+    command: ["/bin/sh", "-c", "mkdir -p /pcap/${RUN_ID} && exec tcpdump -i any -s 0 -U -w /pcap/${RUN_ID}/smf.pcap"]
+
+  cap-upf:
+    <<: *cap
+    container_name: panic-cap-upf
+    network_mode: "service:upf"
+    depends_on: [upf]
+    command: ["/bin/sh", "-c", "mkdir -p /pcap/${RUN_ID} && exec tcpdump -i any -s 0 -U -w /pcap/${RUN_ID}/upf.pcap"]
+
+  cap-nrf:
+    <<: *cap
+    container_name: panic-cap-nrf
+    network_mode: "service:nrf"
+    depends_on: [nrf]
+    command: ["/bin/sh", "-c", "mkdir -p /pcap/${RUN_ID} && exec tcpdump -i any -s 0 -U -w /pcap/${RUN_ID}/nrf.pcap"]
+
+  # O SCP ve TODAS as chamadas SBI (comunicacao indireta, Modelo D). E portanto
+  # o unico ponto de onde se conta o plano de controlo inteiro num so ficheiro.
+  cap-scp:
+    <<: *cap
+    container_name: panic-cap-scp
+    network_mode: "service:scp"
+    depends_on: [scp]
+    command: ["/bin/sh", "-c", "mkdir -p /pcap/${RUN_ID} && exec tcpdump -i any -s 0 -U -w /pcap/${RUN_ID}/scp.pcap"]
+
+  cap-gnb:
+    <<: *cap
+    container_name: panic-cap-gnb
+    network_mode: "service:gnb"
+    depends_on: [gnb]
+    command: ["/bin/sh", "-c", "mkdir -p /pcap/${RUN_ID} && exec tcpdump -i any -s 0 -U -w /pcap/${RUN_ID}/gnb.pcap"]

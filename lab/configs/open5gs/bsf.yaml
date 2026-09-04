@@ -1,0 +1,16 @@
+# BSF -- binding support function.
+logger:
+  level: info
+
+global:
+
+db_uri: mongodb://10.55.0.5/open5gs
+
+bsf:
+  sbi:
+    server:
+      - address: 10.55.0.25
+        port: 7777
+    client:
+      scp:
+        - uri: http://10.55.0.11:7777

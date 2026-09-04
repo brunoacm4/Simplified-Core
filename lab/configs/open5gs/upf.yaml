@@ -1,0 +1,26 @@
+# UPF -- User Plane Function. Unica NF no caminho dos dados do utilizador.
+#
+# Nota para a tese: o UPF nao e, tipicamente, onde esta o excesso. O peso do
+# core 5G esta no plano de CONTROLO. Manter isto presente evita otimizar o sitio
+# errado -- e da-nos um controlo util: se o plano de dados nao mudar entre
+# baseline e versao aligeirada, as diferencas medidas vem todas do controlo.
+
+logger:
+  level: info
+
+global:
+
+upf:
+  pfcp:
+    server:
+      - address: 10.55.2.40
+  gtpu:
+    server:
+      - address: 10.55.1.40
+  session:
+    - subnet: 10.45.0.0/16
+      gateway: 10.45.0.1
+  metrics:
+    server:
+      - address: 10.55.2.40
+        port: 9090

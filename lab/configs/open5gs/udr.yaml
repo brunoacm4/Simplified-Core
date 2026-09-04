@@ -1,0 +1,16 @@
+# UDR -- repositorio de dados. E a unica NF que fala com o MongoDB.
+logger:
+  level: info
+
+global:
+
+db_uri: mongodb://10.55.0.5/open5gs
+
+udr:
+  sbi:
+    server:
+      - address: 10.55.0.22
+        port: 7777
+    client:
+      scp:
+        - uri: http://10.55.0.11:7777

@@ -1,0 +1,12 @@
+# Capturas em bruto: crescem depressa e são regeneráveis por 'make run'.
+# O que se versiona são os resumos em results/summaries/.
+results/pcap/**
+!results/pcap/.gitkeep
+
+*.pcap
+*.pcapng
+
+# Ambiente
+.venv/
+__pycache__/
+*.pyc
