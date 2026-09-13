@@ -1,0 +1,6 @@
+# Sobreposicao: corre o AMF compilado sem a maquinaria NGAP de handover.
+# Usar com  make run-nomob.  Tudo o resto fica igual ao baseline, para que a
+# unica variavel entre as duas execucoes seja o AMF.
+services:
+  amf:
+    image: panic/open5gs:v2.7.7-nomob

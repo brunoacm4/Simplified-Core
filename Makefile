@@ -88,12 +88,26 @@ up-ran:
 	  sleep 1; \
 	  echo ">> UE"; RUN_ID=$$RID $(COMPOSE) up -d --wait ue
 
-# Caminho completo. A ORDEM importa: as capturas tem de estar a correr antes de
-# o UE registar, senao perdemos exatamente o procedimento que queremos medir.
-run: host-check check-params up-core provision capture-start up-ran
+# Caminho completo. Duas coisas importam aqui:
+#
+#  1. Comeca sempre por 'down'. Sem isso, correr 'make run' com o laboratorio ja
+#     de pe nao produz registo nenhum (os containers ja estao a correr), a
+#     captura apanha uma rede em repouso, e a verificacao falha sem que haja
+#     nada de errado com o laboratorio. Custa ~20s e garante que 'make run'
+#     significa sempre a mesma coisa: reproduzir o baseline do zero.
+#
+#  2. A ORDEM do resto: as capturas tem de estar a correr antes de o UE
+#     registar, senao perde-se exatamente o procedimento que queremos medir.
+run: down host-check check-params up-core provision capture-start up-ran
 	@sleep 3
 	@$(MAKE) --no-print-directory capture-stop
 	@$(MAKE) --no-print-directory verify
+
+# Igual ao 'run', mas com o AMF compilado sem a maquinaria de handover.
+# A unica variavel entre 'run' e 'run-nomob' e o binario do AMF.
+run-nomob: COMPOSE := $(COMPOSE) -f lab/compose/amf-nomob.yaml
+run-nomob: COMPOSE_CAP := $(COMPOSE) -f lab/compose/amf-nomob.yaml -f lab/compose/capture.yaml
+run-nomob: run
 
 verify:
 	@bash lab/scripts/verify-e2e.sh

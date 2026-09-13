@@ -27,6 +27,18 @@ WORKDIR /src
 RUN git clone --depth 1 --branch ${OPEN5GS_TAG} https://github.com/open5gs/open5gs.git . \
     && git rev-parse HEAD > /open5gs.commit
 
+# Variante sem suporte de mobilidade (fase 1 do AMF modular).
+# NO_MOBILITY=1 envolve a maquinaria NGAP de handover em guardas de compilacao
+# e injeta o define no alvo do AMF. Ver docs/analise/procedimentos.md,
+# "Fronteira do modulo de mobilidade no AMF".
+ARG NO_MOBILITY=0
+COPY make-mobility-optional.py /tmp/make-mobility-optional.py
+RUN if [ "$NO_MOBILITY" = "1" ]; then \
+        python3 /tmp/make-mobility-optional.py src/amf; \
+    else \
+        echo "AMF completo (NO_MOBILITY=0)"; \
+    fi
+
 RUN meson setup build --prefix=/opt/open5gs \
     && ninja -C build \
     && ninja -C build install
