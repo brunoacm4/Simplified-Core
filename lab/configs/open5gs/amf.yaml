@@ -68,9 +68,13 @@ amf:
   amf_name: panic-amf0
 
   time:
+    # Intervalo de heartbeat NF->NRF. Fica no valor por omissao do Open5GS
+    # (10 s) para o baseline nao ficar contaminado. A experiencia que mediu o
+    # efeito de o aumentar para 60 s esta em
+    # results/summaries/2026-09-04-heartbeats.md -- para a repetir, descomentar:
     # T3512: periodicidade com que o UE se volta a registar so para dizer que
     # ainda existe. Para um sensor aparafusado a uma maquina, isto e sinalizacao
     # pura sem informacao. Fica no valor por omissao do Open5GS: 540 s = 9 minutos.
     # Confirmado na captura: GPRS Timer 3, unidade 30 s x 18 = 540 s.
     t3512:
-      value: 60
+      value: 540

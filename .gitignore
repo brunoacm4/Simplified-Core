@@ -10,3 +10,7 @@ results/pcap/**
 .venv/
 __pycache__/
 *.pyc
+
+# Codigo-fonte de terceiros, clonado nas tags que compilamos.
+# Fora do git: e material de leitura e referencia, nao nosso.
+lab/src/

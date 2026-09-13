@@ -12,3 +12,6 @@ ausf:
     client:
       scp:
         - uri: http://10.55.0.11:7777
+  # time.nf_instance.heartbeat fica no valor por omissao (10 s). A experiencia que
+  # mediu o preco de um intervalo longo esta em
+  # results/summaries/2026-09-04-heartbeats.md
