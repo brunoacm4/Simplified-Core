@@ -113,13 +113,87 @@ números brutos têm de ser divididos por dois, e os heartbeats para o NRF
 (`PATCH /nnrf-nfm/...`) separados do que é sinalização de UE. Formalizar isto é
 trabalho do passo 2.
 
+**Os healthchecks do laboratório dominam qualquer medição de CPU.** Correm de
+2 em 2 segundos em 12 containers — seis processos por segundo — e o Docker
+executa-os **dentro** do container, pelo que o custo é contabilizado à função de
+rede. Medidos em 112,4 mCPU de base, **150× mais** do que o mecanismo de
+heartbeat NF↔NRF que estudámos. Consequência prática: qualquer medição de CPU
+tem de comparar **declives** entre vários pontos, nunca a diferença absoluta
+entre dois cenários. Desligá-los não é opção simples — as dependências
+`depends_on: condition: service_healthy` do compose deixam de funcionar.
+
 **DNS não atravessa o túnel.** O resolver do container UE é o do Docker
 (127.0.0.11), que não é alcançável por `uesimtun0`. Um teste de conectividade
 por *nome* falha mesmo com o plano de dados perfeito. Testar sempre por IP.
 
 ---
 
-## 6. O que ainda não está aqui
+## 6. Limitação estrutural: o dispositivo nunca entra em modo idle
+
+Investigada em 2026-09-02 e revalidada em 2026-09-04. É a limitação mais
+importante do laboratório até à data.
+
+**O objetivo.** Medir quanto custa um registo periódico. Para isso baixou-se o
+T3512 de 540 s para 60 s, de modo a não esperar nove minutos por cada ocorrência.
+
+**O que se observou.** O AMF anunciou corretamente o novo valor — `GPRS Timer:
+60 sec` no Registration Accept — mas nenhum registo periódico ocorreu, numa
+captura de **442 segundos**. Depois do instante t=17 s não há **uma única**
+mensagem NAS ou NGAP.
+
+**A cadeia causal, corrigida.** Uma primeira análise concluiu que "o T3512 nunca
+arranca". Está errado, e o erro merece registo porque é fácil de repetir:
+
+1. O UE completa o registo e entra em `CM-CONNECTED`.
+2. O T3512 **arranca** — observado ao vivo como `T3512: rem[36] int[60]`.
+3. Ao fim de 60 s **expira**.
+4. Pela norma, o registo periódico é iniciado quando o T3512 expira **estando o
+   UE em modo idle**. Como está em `CM-CONNECTED`, nada é despoletado.
+   *(Esta cláusula é leitura nossa da TS 24.501 e deve ser confirmada no texto
+   da norma e no código do UERANSIM antes de ser afirmada num artigo.)*
+5. O temporizador não é rearmado. Consultas posteriores mostram `T3512: .`.
+
+**A armadilha metodológica.** `T3512: .` significa apenas *não está a correr*, o
+que é compatível com "nunca arrancou" **e** com "já arrancou e já expirou". A
+conclusão errada nasceu de uma observação ambígua feita tarde demais. Lição:
+amostrar estados transitórios ao longo do tempo, nunca uma vez só no fim.
+
+**Porque é que o UE nunca sai de CM-CONNECTED.** Num sistema real, quem provoca a
+transição para idle é o gNB, ao detetar inatividade de rádio e enviar
+`UEContextReleaseRequest` com causa *user inactivity*. O gNB do UERANSIM não
+implementa temporizador de inatividade, e o `nr-cli` não expõe nenhum comando
+para forçar a transição.
+
+**Teste feito para tentar contornar (2026-09-04).** `nr-cli ps-release-all`
+liberta as sessões PDU, mas **não** a ligação de sinalização — são coisas
+distintas. Observado: `PDU Session Release Request` → `Release Command` →
+libertação local, e um segundo depois o UERANSIM restabelece a sessão sozinho
+com IP novo, por ter uma sessão declarada em `ue.yaml`. O `cm-state` nunca saiu
+de `CM-CONNECTED`.
+
+**Consequência.** Três mecanismos ficam fora do estudo empírico neste
+laboratório, e são parte substancial da maquinaria de mobilidade:
+
+- registo periódico (T3512)
+- paging
+- Service Request
+
+**Decisão: documentar e seguir em frente.** As saídas conhecidas são modificar o
+código do UERANSIM para forçar a libertação, ou trocar de simulador de RAN
+(`gnbsim`, `PacketRusher` — por verificar se algum modela o ciclo
+idle/connected). Nenhuma foi tomada, por duas razões:
+
+1. Quanto mais se modifica o simulador, mais as medições passam a ser sobre o
+   simulador modificado e menos sobre 5G.
+2. **Um gNB comercial implementa isto nativamente.** Esta limitação desaparece
+   sozinha com RAN real — o que é um argumento concreto para o acesso ao
+   equipamento do IT, e deve ser levado à orientação nesses termos.
+
+**O que a experiência validou, apesar do resultado negativo:** a malha completa
+de experimentação — alterar um parâmetro, reconstruir o laboratório, confirmar
+o efeito na mensagem capturada no ar. É a base de tudo o que se segue, e passou.
+
+## 7. O que ainda não está aqui
 
 - **free5GC** — o UPF exige o módulo de kernel `gtp5g`, ausente neste host e
   impossível de instalar de dentro de um container. Fica para o passo 3, e

@@ -49,6 +49,7 @@ Outros alvos: `make verify`, `make status`, `make logs SVC=amf`, `make ue-shell`
 | [`lab/configs/`](lab/configs/) | Configuração de cada NF e do UERANSIM, versionada |
 | [`lab/scripts/`](lab/scripts/) | `host-check`, `check-params`, `provision-subscribers`, `verify-e2e` |
 | [`docs/lab/topologia.md`](docs/lab/topologia.md) | **Ler antes de interpretar qualquer medição** — topologia, desvios deliberados, armadilhas |
+| [`docs/analise/procedimentos.md`](docs/analise/procedimentos.md) | **Auditoria de procedimentos** — classificação do que é necessário, degenerado ou removível sem mobilidade |
 | [`docs/meetings/`](docs/meetings/) | Notas de reunião |
 | [`results/summaries/`](results/summaries/) | Resultados versionados (as capturas em bruto ficam fora do git) |
 
