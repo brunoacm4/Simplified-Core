@@ -33,6 +33,27 @@ docker compose down               # parar (o assinante fica no volume mongodb-da
 Capturar uma interface no host: `dumpcap -i br-n2 -w n2.pcapng` (sem sudo se o utilizador estiver no
 grupo `wireshark`), ou Wireshark na bridge.
 
+## Fork do UERANSIM (`patches/`)
+
+O UERANSIM é compilado a partir do clone local (`../UERANSIM`), que está no ramo **`panic/v3.3.0`**
+(a partir da tag v3.3.0). As nossas alterações estão em `patches/`, uma por ficheiro, com a
+justificação no cabeçalho:
+
+| Patch | O que faz | Porquê |
+|---|---|---|
+| `0001-reverter-selecao-amf-por-slice.patch` | Reverte a seleção de AMF por slice no gNB (commits upstream `2da35a6` e `ef42482`) | Sem isto um UE não consegue voltar do modo idle: o gNB falha a seleção de AMF num Service Request. Afeta as tags v3.2.7 a v3.3.0; corrigido só no master. O commit também punha o UE a enviar o Requested NSSAI sem proteção, contra a TS 24.501 §4.4.6 |
+
+Para recriar o ramo a partir de um clone limpo:
+
+```bash
+cd ../UERANSIM
+git checkout -b panic/v3.3.0 v3.3.0
+git apply ../lab/patches/0001-reverter-selecao-amf-por-slice.patch
+cd ../lab && docker compose build gnb        # a mesma imagem serve gNB e UE
+```
+
+Verificação após aplicar: uma corrida de registo tem de continuar a dar **9 NGAP e 16 pedidos SBI**.
+
 ## Variantes
 
 Uma variante é um conjunto de alterações por cima da baseline, em `variantes/<nome>/`, aplicado com um
