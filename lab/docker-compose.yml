@@ -1,0 +1,172 @@
+# Laboratório 5G SA: Open5GS v2.8.0 + UERANSIM v3.3.0
+# Um contentor por componente, uma rede Docker por interface 3GPP.
+#
+#   sbi  10.100.1.0/24  NFs do core + MongoDB
+#   n2   10.100.2.0/24  gNB <-> AMF   (NGAP/SCTP)
+#   n3   10.100.3.0/24  gNB <-> UPF   (GTP-U)
+#   n4   10.100.4.0/24  SMF <-> UPF   (PFCP)
+#   ran  10.100.5.0/24  UE  <-> gNB   (ligação rádio simulada do UERANSIM)
+#
+# N6 (acesso do UE à Internet) não está configurado — decisão adiada.
+
+name: lab
+
+x-open5gs: &open5gs
+  image: core-simplified/open5gs:v2.8.0
+  build:
+    context: ../open5gs
+    dockerfile: ../lab/images/open5gs/Dockerfile
+  restart: unless-stopped
+
+x-ueransim: &ueransim
+  image: core-simplified/ueransim:v3.3.0
+  build:
+    context: ../UERANSIM
+    dockerfile: ../lab/images/ueransim/Dockerfile
+  restart: unless-stopped
+
+services:
+  mongodb:
+    image: mongo:8.0
+    restart: unless-stopped
+    volumes:
+      - mongodb-data:/data/db
+      - ../open5gs/misc/db/open5gs-dbctl:/opt/open5gs-dbctl:ro
+    networks:
+      sbi: { ipv4_address: 10.100.1.100 }
+
+  nrf:
+    <<: *open5gs
+    command: open5gs-nrfd -c /etc/open5gs/nrf.yaml
+    volumes: [ ./config/open5gs/nrf.yaml:/etc/open5gs/nrf.yaml:ro ]
+    networks:
+      sbi: { ipv4_address: 10.100.1.10 }
+
+  scp:
+    <<: *open5gs
+    command: open5gs-scpd -c /etc/open5gs/scp.yaml
+    volumes: [ ./config/open5gs/scp.yaml:/etc/open5gs/scp.yaml:ro ]
+    depends_on: [ nrf ]
+    networks:
+      sbi: { ipv4_address: 10.100.1.200 }
+
+  amf:
+    <<: *open5gs
+    command: open5gs-amfd -c /etc/open5gs/amf.yaml
+    volumes: [ ./config/open5gs/amf.yaml:/etc/open5gs/amf.yaml:ro ]
+    depends_on: [ scp ]
+    networks:
+      sbi: { ipv4_address: 10.100.1.5 }
+      n2: { ipv4_address: 10.100.2.5 }
+
+  smf:
+    <<: *open5gs
+    command: open5gs-smfd -c /etc/open5gs/smf.yaml
+    volumes: [ ./config/open5gs/smf.yaml:/etc/open5gs/smf.yaml:ro ]
+    depends_on: [ scp, upf ]
+    networks:
+      sbi: { ipv4_address: 10.100.1.4 }
+      n4: { ipv4_address: 10.100.4.4 }
+
+  upf:
+    <<: *open5gs
+    entrypoint: /scripts/upf-entrypoint.sh
+    volumes:
+      - ./config/open5gs/upf.yaml:/etc/open5gs/upf.yaml:ro
+      - ./scripts/upf-entrypoint.sh:/scripts/upf-entrypoint.sh:ro
+    cap_add: [ NET_ADMIN ]
+    devices: [ /dev/net/tun:/dev/net/tun ]
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+    networks:
+      n3: { ipv4_address: 10.100.3.7 }
+      n4: { ipv4_address: 10.100.4.7 }
+
+  ausf:
+    <<: *open5gs
+    command: open5gs-ausfd -c /etc/open5gs/ausf.yaml
+    volumes: [ ./config/open5gs/ausf.yaml:/etc/open5gs/ausf.yaml:ro ]
+    depends_on: [ scp ]
+    networks:
+      sbi: { ipv4_address: 10.100.1.11 }
+
+  udm:
+    <<: *open5gs
+    command: open5gs-udmd -c /etc/open5gs/udm.yaml
+    volumes: [ ./config/open5gs/udm.yaml:/etc/open5gs/udm.yaml:ro ]
+    depends_on: [ scp ]
+    networks:
+      sbi: { ipv4_address: 10.100.1.12 }
+
+  udr:
+    <<: *open5gs
+    command: open5gs-udrd -c /etc/open5gs/udr.yaml
+    volumes: [ ./config/open5gs/udr.yaml:/etc/open5gs/udr.yaml:ro ]
+    depends_on: [ scp, mongodb ]
+    networks:
+      sbi: { ipv4_address: 10.100.1.20 }
+
+  pcf:
+    <<: *open5gs
+    command: open5gs-pcfd -c /etc/open5gs/pcf.yaml
+    volumes: [ ./config/open5gs/pcf.yaml:/etc/open5gs/pcf.yaml:ro ]
+    depends_on: [ scp, mongodb ]
+    networks:
+      sbi: { ipv4_address: 10.100.1.13 }
+
+  nssf:
+    <<: *open5gs
+    command: open5gs-nssfd -c /etc/open5gs/nssf.yaml
+    volumes: [ ./config/open5gs/nssf.yaml:/etc/open5gs/nssf.yaml:ro ]
+    depends_on: [ scp ]
+    networks:
+      sbi: { ipv4_address: 10.100.1.14 }
+
+  bsf:
+    <<: *open5gs
+    command: open5gs-bsfd -c /etc/open5gs/bsf.yaml
+    volumes: [ ./config/open5gs/bsf.yaml:/etc/open5gs/bsf.yaml:ro ]
+    depends_on: [ scp ]
+    networks:
+      sbi: { ipv4_address: 10.100.1.15 }
+
+  gnb:
+    <<: *ueransim
+    command: nr-gnb -c /etc/ueransim/gnb.yaml
+    volumes: [ ./config/ueransim/gnb.yaml:/etc/ueransim/gnb.yaml:ro ]
+    depends_on: [ amf ]
+    networks:
+      ran: { ipv4_address: 10.100.5.50 }
+      n2: { ipv4_address: 10.100.2.50 }
+      n3: { ipv4_address: 10.100.3.50 }
+
+  ue:
+    <<: *ueransim
+    command: nr-ue -c /etc/ueransim/ue.yaml -n ${N_UES:-1}   # N_UES UEs com IMSIs consecutivos
+    volumes: [ ./config/ueransim/ue.yaml:/etc/ueransim/ue.yaml:ro ]
+    depends_on: [ gnb ]
+    cap_add: [ NET_ADMIN ]
+    devices: [ /dev/net/tun:/dev/net/tun ]
+    networks:
+      ran: { ipv4_address: 10.100.5.60 }
+
+# Bridges com nome fixo no host, para capturar cada interface (ex.: tcpdump -i br-n2)
+networks:
+  sbi:
+    driver_opts: { com.docker.network.bridge.name: br-sbi }
+    ipam: { config: [ { subnet: 10.100.1.0/24 } ] }
+  n2:
+    driver_opts: { com.docker.network.bridge.name: br-n2 }
+    ipam: { config: [ { subnet: 10.100.2.0/24 } ] }
+  n3:
+    driver_opts: { com.docker.network.bridge.name: br-n3 }
+    ipam: { config: [ { subnet: 10.100.3.0/24 } ] }
+  n4:
+    driver_opts: { com.docker.network.bridge.name: br-n4 }
+    ipam: { config: [ { subnet: 10.100.4.0/24 } ] }
+  ran:
+    driver_opts: { com.docker.network.bridge.name: br-ran }
+    ipam: { config: [ { subnet: 10.100.5.0/24 } ] }
+
+volumes:
+  mongodb-data: {}

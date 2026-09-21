@@ -1,0 +1,42 @@
+# --- Código de terceiros: clones originais, não modificados ---
+# Ficam de fora; a nossa versão modificada do core vai numa pasta própria.
+# As barras iniciais são obrigatórias: sem elas, 'open5gs/' também apanhava
+# lab/config/open5gs/ e lab/images/open5gs/.
+/open5gs/
+/UERANSIM/
+
+# --- Texto ainda por rever ---
+/notes/
+
+# --- Normas 3GPP e artigos (direitos de autor e tamanho) ---
+/specs/
+/papers/
+
+# --- Resultados de execução (capturas e métricas) ---
+*.pcapng
+*.pcap
+*.metricas.json
+*.ngap.tsv
+*.sbi.tsv
+*.recursos.tsv
+*.t_ue
+*.meta
+
+# --- Compilação ---
+build/
+subprojects/*/
+!subprojects/*.wrap
+*.o
+*.a
+*.so
+*.so.*
+
+# --- Python ---
+__pycache__/
+*.pyc
+
+# --- Ambiente e editor ---
+.env
+*.log
+.vscode/
+.idea/

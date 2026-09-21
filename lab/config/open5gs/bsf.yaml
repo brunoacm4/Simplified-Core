@@ -1,0 +1,13 @@
+# Baseado em open5gs/configs/open5gs/bsf.yaml.in (v2.8.0).
+# Alterações face ao upstream: endereços (redes do lab) e logging só para stdout.
+global:
+  max:
+    ue: 1024
+bsf:
+  sbi:
+    server:
+      - address: 10.100.1.15
+        port: 7777
+    client:
+      scp:
+        - uri: http://10.100.1.200:7777

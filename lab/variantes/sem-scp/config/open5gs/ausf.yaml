@@ -1,0 +1,14 @@
+# Baseado em open5gs/configs/open5gs/ausf.yaml.in (v2.8.0).
+# Alterações face ao upstream: endereços (redes do lab) e logging só para stdout.
+# VARIANTE SEM SCP (modelo B, TS 23.501 Anexo E): cliente SBI aponta para a NRF em vez da SCP.
+global:
+  max:
+    ue: 1024
+ausf:
+  sbi:
+    server:
+      - address: 10.100.1.11
+        port: 7777
+    client:
+      nrf:
+        - uri: http://10.100.1.10:7777

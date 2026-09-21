@@ -1,0 +1,13 @@
+# Baseado em open5gs/configs/open5gs/ausf.yaml.in (v2.8.0).
+# Alterações face ao upstream: endereços (redes do lab) e logging só para stdout.
+global:
+  max:
+    ue: 1024
+ausf:
+  sbi:
+    server:
+      - address: 10.100.1.11
+        port: 7777
+    client:
+      scp:
+        - uri: http://10.100.1.200:7777

@@ -1,0 +1,13 @@
+# Baseado em open5gs/configs/open5gs/scp.yaml.in (v2.8.0).
+# Alterações face ao upstream: endereços (redes do lab) e logging só para stdout.
+global:
+  max:
+    ue: 1024
+scp:
+  sbi:
+    server:
+      - address: 10.100.1.200
+        port: 7777
+    client:
+      nrf:
+        - uri: http://10.100.1.10:7777

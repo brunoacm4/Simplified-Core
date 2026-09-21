@@ -1,0 +1,14 @@
+# Baseado em open5gs/configs/open5gs/nrf.yaml.in (v2.8.0).
+# Alterações face ao upstream: endereços (redes do lab) e logging só para stdout.
+global:
+  max:
+    ue: 1024
+nrf:
+  serving:
+    - plmn_id:
+        mcc: 999
+        mnc: 70
+  sbi:
+    server:
+      - address: 10.100.1.10
+        port: 7777

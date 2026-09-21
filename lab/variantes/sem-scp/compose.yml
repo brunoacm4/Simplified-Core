@@ -1,0 +1,35 @@
+# Variante SEM SCP (modelo B da TS 23.501, Anexo E): as NFs falam diretamente umas com as outras
+# e usam a NRF para se registarem e conhecerem. Só muda configuração, nenhum código.
+#
+# Uso (a partir de lab/), por cima do compose da baseline:
+#   docker compose -f docker-compose.yml -f variantes/sem-scp/compose.yml up -d
+# Caminhos relativos a lab/ (pasta do primeiro ficheiro -f).
+
+services:
+  scp:
+    profiles: [ desativado ]          # a SCP não arranca
+
+  amf:
+    depends_on: !override [ nrf ]
+    volumes: [ ./variantes/sem-scp/config/open5gs/amf.yaml:/etc/open5gs/amf.yaml:ro ]
+  smf:
+    depends_on: !override [ nrf, upf ]
+    volumes: [ ./variantes/sem-scp/config/open5gs/smf.yaml:/etc/open5gs/smf.yaml:ro ]
+  ausf:
+    depends_on: !override [ nrf ]
+    volumes: [ ./variantes/sem-scp/config/open5gs/ausf.yaml:/etc/open5gs/ausf.yaml:ro ]
+  udm:
+    depends_on: !override [ nrf ]
+    volumes: [ ./variantes/sem-scp/config/open5gs/udm.yaml:/etc/open5gs/udm.yaml:ro ]
+  udr:
+    depends_on: !override [ nrf, mongodb ]
+    volumes: [ ./variantes/sem-scp/config/open5gs/udr.yaml:/etc/open5gs/udr.yaml:ro ]
+  pcf:
+    depends_on: !override [ nrf, mongodb ]
+    volumes: [ ./variantes/sem-scp/config/open5gs/pcf.yaml:/etc/open5gs/pcf.yaml:ro ]
+  nssf:
+    depends_on: !override [ nrf ]
+    volumes: [ ./variantes/sem-scp/config/open5gs/nssf.yaml:/etc/open5gs/nssf.yaml:ro ]
+  bsf:
+    depends_on: !override [ nrf ]
+    volumes: [ ./variantes/sem-scp/config/open5gs/bsf.yaml:/etc/open5gs/bsf.yaml:ro ]

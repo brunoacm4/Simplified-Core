@@ -1,0 +1,32 @@
+# Baseado em open5gs/configs/open5gs/udm.yaml.in (v2.8.0).
+# Alterações face ao upstream: endereços (redes do lab) e logging só para stdout.
+global:
+  max:
+    ue: 1024
+udm:
+  hnet:
+    - id: 1
+      scheme: 1
+      key: /opt/open5gs/etc/open5gs/hnet/curve25519-1.key
+    - id: 2
+      scheme: 2
+      key: /opt/open5gs/etc/open5gs/hnet/secp256r1-2.key
+    - id: 3
+      scheme: 1
+      key: /opt/open5gs/etc/open5gs/hnet/curve25519-3.key
+    - id: 4
+      scheme: 2
+      key: /opt/open5gs/etc/open5gs/hnet/secp256r1-4.key
+    - id: 5
+      scheme: 1
+      key: /opt/open5gs/etc/open5gs/hnet/curve25519-5.key
+    - id: 6
+      scheme: 2
+      key: /opt/open5gs/etc/open5gs/hnet/secp256r1-6.key
+  sbi:
+    server:
+      - address: 10.100.1.12
+        port: 7777
+    client:
+      scp:
+        - uri: http://10.100.1.200:7777
