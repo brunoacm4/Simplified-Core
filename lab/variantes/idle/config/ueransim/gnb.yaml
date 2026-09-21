@@ -32,5 +32,5 @@ cellAccessType: nr
 # utilizador, em qualquer direção; a sinalização não conta.
 # 0 = desligado, que é o comportamento do UERANSIM original — os UEs ficam ligados para sempre.
 # Para exercitar o ciclo de inatividade, usar a variante 'idle' (variantes/idle/).
-inactivityTimer: 0     # segundos sem dados até o gNB pedir a libertação do contexto
+inactivityTimer: 10    # segundos sem dados até o gNB pedir a libertação do contexto
 minConnectionTime: 5   # segundos após a criação do contexto antes de a libertação ser possível

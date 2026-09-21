@@ -1,0 +1,14 @@
+# Variante IDLE: o gNB liberta o contexto de um UE ao fim de 10 s sem tráfego do utilizador,
+# como faz um gNB comercial. Só assim o UE entra em CM-IDLE e se exercitam os procedimentos
+# que só existem a partir daí: Service Request, paging e registo periódico (T3512).
+#
+# Exige o UERANSIM do ramo panic/v3.3.0 (patches 0001, 0002 e 0003 em lab/patches/).
+# A baseline tem inactivityTimer: 0, ou seja o comportamento original: os UEs nunca adormecem.
+#
+# Uso (a partir de lab/), por cima do compose da baseline:
+#   docker compose -f docker-compose.yml -f variantes/idle/compose.yml up -d
+# Caminhos relativos a lab/ (pasta do primeiro ficheiro -f).
+
+services:
+  gnb:
+    volumes: [ ./variantes/idle/config/ueransim/gnb.yaml:/etc/ueransim/gnb.yaml:ro ]

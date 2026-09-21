@@ -1,0 +1,44 @@
+Preencher o ngKSI no registo de mobilidade e periódico (UERANSIM v3.3.0)
+
+NasMm::sendMobilityRegistration() nunca preenchia request->nasKeySetIdentifier,
+ao contrário de sendInitialRegistration(). O IE ficava com o valor por omissão
+ksi = 0b111 (NOT_AVAILABLE_OR_RESERVED, src/lib/nas/ie1.hpp:139), ou seja o UE
+declarava não ter contexto de segurança em todos os registos de mobilidade e
+periódicos.
+
+Consequência no core: a macro SECURITY_CONTEXT_IS_VALID do Open5GS
+(src/amf/context.h:427) exige ksi != NO_KEY_IS_AVAILABLE, por isso o AMF não
+reconhecia o contexto existente, corria uma autenticação 5G-AKA completa e
+tratava o UE como se chegasse de novo — libertando as sessões PDU antigas.
+
+Medido no lab (1 UE, T3512 = 540 s, Open5GS v2.8.0), um registo periódico:
+
+                          antes          depois
+  Mensagens NGAP            9              5
+  Pedidos SBI              ~21             0
+  Mensagens PFCP            2              0
+  Sessão PDU           destruída       preservada
+
+Ainda por corrigir no master do upstream (verificado em 2026-09-21).
+
+diff --git a/src/ue/nas/mm/register.cpp b/src/ue/nas/mm/register.cpp
+index 4176805..529ec57 100644
+--- a/src/ue/nas/mm/register.cpp
++++ b/src/ue/nas/mm/register.cpp
+@@ -233,6 +233,16 @@ EProcRc NasMm::sendMobilityRegistration(ERegUpdateCause updateCause)
+         request->requestedNSSAI = nas::utils::NssaiFrom(requestedNssai);
+     request->ueSecurityCapability = createSecurityCapabilityIe();
+ 
++    // Assign ngKSI
++    // Without this the IE keeps its default value (ksi = 0b111, "no key is available"), so the
++    // AMF cannot identify the current 5G NAS security context and runs a full authentication on
++    // every mobility or periodic registration update. Same block as sendInitialRegistration().
++    if (m_usim->m_currentNsCtx)
++    {
++        request->nasKeySetIdentifier.tsc = m_usim->m_currentNsCtx->tsc;
++        request->nasKeySetIdentifier.ksi = m_usim->m_currentNsCtx->ngKsi;
++    }
++
+     // TODO: Wireshark cannot decode the message if this IE is used, check later
+     // request->networkSlicingIndication = nas::IENetworkSlicingIndication{};
+     // request->networkSlicingIndication->dcni =

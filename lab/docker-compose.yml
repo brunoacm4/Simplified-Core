@@ -147,6 +147,12 @@ services:
     depends_on: [ gnb ]
     cap_add: [ NET_ADMIN ]
     devices: [ /dev/net/tun:/dev/net/tun ]
+    # Sem isto o kernel do contentor põe um endereço IPv6 link-local na interface do túnel
+    # (mesmo em sessões IPv4) e o tráfego IPv6 que lhe envia conta como dados de subida
+    # pendentes: o UE sai de CM-IDLE ~25 s depois de lá entrar e o T3512 nunca expira.
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: 1
+      net.ipv6.conf.default.disable_ipv6: 1
     networks:
       ran: { ipv4_address: 10.100.5.60 }
 

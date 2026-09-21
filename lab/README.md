@@ -42,14 +42,30 @@ justificação no cabeçalho:
 | Patch | O que faz | Porquê |
 |---|---|---|
 | `0001-reverter-selecao-amf-por-slice.patch` | Reverte a seleção de AMF por slice no gNB (commits upstream `2da35a6` e `ef42482`) | Sem isto um UE não consegue voltar do modo idle: o gNB falha a seleção de AMF num Service Request. Afeta as tags v3.2.7 a v3.3.0; corrigido só no master. O commit também punha o UE a enviar o Requested NSSAI sem proteção, contra a TS 24.501 §4.4.6 |
+| `0002-ngksi-no-registo-de-mobilidade.patch` | `sendMobilityRegistration()` passa a preencher o ngKSI a partir do contexto de segurança atual | Sem isto o UE declara não ter chave (ngKSI = 7) em todos os registos de mobilidade e periódicos: o core faz uma autenticação 5G-AKA completa e destrói as sessões PDU. Medido: 9 NGAP e ~21 pedidos SBI, contra 5 NGAP e 0 SBI com o patch. Por corrigir no upstream |
+| `0003-temporizador-de-inatividade-no-gnb.patch` | Acrescenta ao gNB um temporizador de inatividade: liberta o contexto do UE ao fim de N segundos sem tráfego do utilizador (causa NGAP `user inactivity`) | Sem isto o UE nunca vai a CM-IDLE e os procedimentos do ciclo de inatividade não existem. **Desligado por omissão** (`inactivityTimer: 0`), para não alterar as medições já feitas; liga-se na variante `idle` |
+| `0004-limpar-dados-pendentes-ao-ligar.patch` | Limpa o estado "dados de subida pendentes" ao entrar em CM-CONNECTED | Sem isto um dispositivo que transmita um pacote de cada vez só acorda **uma vez**: o sinalizador fica preso a `true` e os pacotes seguintes já não pedem ligação. Sintoma: `ps-list` mostra `data-pending: true` com o UE em CM-IDLE. Por corrigir no upstream |
 
-Para recriar o ramo a partir de um clone limpo:
+O ramo está publicado em **https://github.com/brunoacm4/UERANSIM** (fork de `aligungr/UERANSIM`),
+ramo `panic/v3.3.0`, commit `0e29cfd`.
+
+A partir de uma máquina limpa:
+
+```bash
+git clone -b panic/v3.3.0 https://github.com/brunoacm4/UERANSIM.git UERANSIM
+cd lab && docker compose build gnb           # a mesma imagem serve gNB e UE
+```
+
+Ou, partindo de um clone do upstream, aplicando os patches à mão:
 
 ```bash
 cd ../UERANSIM
 git checkout -b panic/v3.3.0 v3.3.0
 git apply ../lab/patches/0001-reverter-selecao-amf-por-slice.patch
-cd ../lab && docker compose build gnb        # a mesma imagem serve gNB e UE
+git apply ../lab/patches/0002-ngksi-no-registo-de-mobilidade.patch
+git apply ../lab/patches/0003-temporizador-de-inatividade-no-gnb.patch
+git apply ../lab/patches/0004-limpar-dados-pendentes-ao-ligar.patch
+cd ../lab && docker compose build gnb
 ```
 
 Verificação após aplicar: uma corrida de registo tem de continuar a dar **9 NGAP e 16 pedidos SBI**.
@@ -62,6 +78,7 @@ compose adicional (`docker compose -f docker-compose.yml -f variantes/<nome>/com
 | Variante | O que muda | Código? |
 |---|---|---|
 | `sem-scp` | Sem SCP: as NFs falam diretamente entre si e usam a NRF (modelo B, TS 23.501 Anexo E) | Não (só configuração) |
+| `idle` | `inactivityTimer: 10` no gNB: os UEs adormecem 10 s depois do último pacote e acordam com um Service Request. Exercita o ciclo de inatividade | Sim (patch 0003 no UERANSIM) |
 
 ## Medições
 
@@ -73,7 +90,23 @@ compose adicional (`docker compose -f docker-compose.yml -f variantes/<nome>/com
 # experiência completa: N corridas alternadas baseline/variante + comparação
 ./scripts/experiencia.sh ../notes/experiencias/<data>-<variante> <variante> 5
 ./scripts/comparar.py <pasta>/baseline <pasta>/<variante> [--md resultados.md]
+
+# cenário "fábrica" (S2): dispositivos que transmitem e adormecem pelo meio
+[VARIANTE=sem-scp] N_UES=20 PERIODO=30 DURACAO=300 \
+  ./scripts/cenario-fabrica.sh <pasta> corrida1
+./scripts/analisar-fabrica.py <pasta>/corrida1.pcapng    # -> corrida1.fabrica.json
 ```
+
+**Dois cenários:**
+
+| | O que é | Para que serve |
+|---|---|---|
+| S1 "arranque" | N UEs registam-se e ficam ligados (`capturar-registo.sh`) | Comparável com tudo o que já medimos e com a literatura |
+| S2 "fábrica" | Temporizador de inatividade ligado; cada dispositivo transmite de PERIODO em PERIODO segundos durante DURACAO | O realista: é o ciclo que domina a carga de uma rede industrial |
+
+**Duas referências**, reportadas lado a lado em cada experiência: **Open5GS por omissão** (referência
+externa, para os totais acumulados) e **sem SCP** (base de trabalho, para o ganho da SCP não
+contaminar cada passo novo).
 
 Métricas por corrida: mensagens NGAP e pedidos/mensagens SBI por fase (arranque, registo, sessão PDU),
 pedidos de gestão na NRF, latência do lado do core, bytes por interface (em repouso e com UE),

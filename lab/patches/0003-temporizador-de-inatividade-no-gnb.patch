@@ -1,0 +1,281 @@
+Temporizador de inatividade no gNB (funcionalidade nova, desligada por omissão)
+
+O gNB do UERANSIM nunca liberta o contexto de um UE por sua iniciativa: não
+existe uma única linha de inatividade no projeto. Sem isso o UE fica
+permanentemente em CM-CONNECTED e os procedimentos que só existem a partir do
+modo idle — Service Request, paging e registo periódico (T3512) — nunca são
+exercitados. Um gNB comercial liberta ao fim de alguns segundos sem tráfego.
+
+A 3GPP não define este temporizador: define apenas a causa NGAP
+"user inactivity" (TS 38.413) que o gNB usa ao pedir a libertação. O critério e
+o valor são escolha da implementação. Aqui:
+
+  - só conta tráfego do utilizador, em qualquer direção, observado na tarefa
+    GTP (handleUplinkData e a entrega de descida);
+  - só são considerados UEs com sessão PDU, porque um UE a meio do registo ou
+    do estabelecimento da sessão ainda não tem contexto na tarefa GTP: nunca é
+    cortado a meio de um procedimento;
+  - minConnectionTime dá uma margem adicional depois da criação do contexto;
+  - a verificação corre uma vez por segundo e o pedido é enviado à tarefa NGAP,
+    que chama a sendContextRelease() já existente.
+
+Configuração no gnb.yaml (ambas opcionais):
+
+  inactivityTimer: 0     # segundos sem dados; 0 = desligado (comportamento atual)
+  minConnectionTime: 5   # margem após a criação do contexto
+
+Por omissão fica desligado, portanto o comportamento do gNB não muda para quem
+não pedir a funcionalidade.
+
+Verificado no lab (Open5GS v2.8.0, inactivityTimer: 10):
+  sessão estabelecida -> 10 s sem tráfego -> libertação automática -> CM-IDLE
+  -> um pacote de subida -> Service Request -> Service Accept em 2 ms
+  -> 10 s sem tráfego -> nova libertação.
+
+diff --git a/src/gnb.cpp b/src/gnb.cpp
+index 7ff2282..1edf6aa 100644
+--- a/src/gnb.cpp
++++ b/src/gnb.cpp
+@@ -56,6 +56,15 @@ static nr::gnb::GnbConfig *ReadConfigYaml()
+         result->gtpAdvertiseIp = yaml::GetIpAddress(config, "gtpAdvertiseIp");
+ 
+     result->ignoreStreamIds = yaml::GetBool(config, "ignoreStreamIds");
++
++    // Temporizador de inatividade (opcional). A 3GPP não o define: o critério e o valor são escolha
++    // do gNB. Aqui só conta tráfego do utilizador; 0 desliga a funcionalidade.
++    result->inactivityTimer = yaml::HasField(config, "inactivityTimer")
++                                  ? yaml::GetInt32(config, "inactivityTimer", 0, 86400)
++                                  : 0;
++    result->minConnectionTime = yaml::HasField(config, "minConnectionTime")
++                                    ? yaml::GetInt32(config, "minConnectionTime", 0, 86400)
++                                    : 5;
+     result->pagingDrx = EPagingDrx::V128;
+     result->name = "UERANSIM-gnb-" + std::to_string(result->plmn.mcc) + "-" + std::to_string(result->plmn.mnc) + "-" +
+                    std::to_string(result->getGnbId()); // NOTE: Avoid using "/" dir separator character.
+diff --git a/src/gnb/gtp/task.cpp b/src/gnb/gtp/task.cpp
+index 0475dcb..911f149 100644
+--- a/src/gnb/gtp/task.cpp
++++ b/src/gnb/gtp/task.cpp
+@@ -9,12 +9,17 @@
+ #include "task.hpp"
+ 
+ #include <gnb/gtp/proto.hpp>
++#include <gnb/ngap/task.hpp>
+ #include <gnb/rls/task.hpp>
++#include <utils/common.hpp>
+ #include <utils/constants.hpp>
+ #include <utils/libc_error.hpp>
+ 
+ #include <asn/ngap/ASN_NGAP_QosFlowSetupRequestItem.h>
+ 
++static constexpr const int TIMER_ID_INACTIVITY_CHECK = 1;
++static constexpr const int TIMER_PERIOD_INACTIVITY_CHECK = 1000;
++
+ namespace nr::gnb
+ {
+ 
+@@ -36,6 +41,13 @@ void GtpTask::onStart()
+     {
+         m_logger->err("GTP/UDP task could not be created. %s", e.what());
+     }
++
++    if (m_base->config->inactivityTimer > 0)
++    {
++        m_logger->info("UE inactivity timer is %d seconds (minimum connection time %d seconds)",
++                       m_base->config->inactivityTimer, m_base->config->minConnectionTime);
++        setTimer(TIMER_ID_INACTIVITY_CHECK, TIMER_PERIOD_INACTIVITY_CHECK);
++    }
+ }
+ 
+ void GtpTask::onQuit()
+@@ -88,6 +100,15 @@ void GtpTask::onLoop()
+         }
+         break;
+     }
++    case NtsMessageType::TIMER_EXPIRED: {
++        auto &w = dynamic_cast<NmTimerExpired &>(*msg);
++        if (w.timerId == TIMER_ID_INACTIVITY_CHECK)
++        {
++            checkInactivity();
++            setTimer(TIMER_ID_INACTIVITY_CHECK, TIMER_PERIOD_INACTIVITY_CHECK);
++        }
++        break;
++    }
+     case NtsMessageType::UDP_SERVER_RECEIVE:
+         handleUdpReceive(dynamic_cast<udp::NwUdpServerReceive &>(*msg));
+         break;
+@@ -100,7 +121,11 @@ void GtpTask::onLoop()
+ void GtpTask::handleUeContextUpdate(const GtpUeContextUpdate &msg)
+ {
+     if (!m_ueContexts.count(msg.ueId))
++    {
+         m_ueContexts[msg.ueId] = std::make_unique<GtpUeContext>(msg.ueId);
++        m_ueContexts[msg.ueId]->createdAt = utils::CurrentTimeMillis();
++        m_ueContexts[msg.ueId]->lastActivity = m_ueContexts[msg.ueId]->createdAt;
++    }
+ 
+     auto &ue = m_ueContexts[msg.ueId];
+     ue->ueAmbr = msg.ueAmbr;
+@@ -194,6 +219,8 @@ void GtpTask::handleUplinkData(int ueId, int psi, OctetString &&pdu)
+         return;
+     }
+ 
++    markActivity(ueId);
++
+     auto &pduSession = m_pduSessions[sessionInd];
+ 
+     if (m_rateLimiter->allowUplinkPacket(sessionInd, static_cast<int64_t>(pdu.length())))
+@@ -236,6 +263,8 @@ void GtpTask::handleUdpReceive(const udp::NwUdpServerReceive &msg)
+ 
+         if (m_rateLimiter->allowDownlinkPacket(sessionInd, gtp->payload.length()))
+         {
++            markActivity(GetUeId(sessionInd));
++
+             auto w = std::make_unique<NmGnbGtpToRls>(NmGnbGtpToRls::DATA_PDU_DELIVERY);
+             w->ueId = GetUeId(sessionInd);
+             w->psi = GetPsi(sessionInd);
+@@ -264,6 +293,47 @@ void GtpTask::handleUdpReceive(const udp::NwUdpServerReceive &msg)
+     }
+ }
+ 
++// Regista tráfego do utilizador (subida ou descida) para o temporizador de inatividade.
++void GtpTask::markActivity(int ueId)
++{
++    if (m_base->config->inactivityTimer <= 0)
++        return;
++
++    auto it = m_ueContexts.find(ueId);
++    if (it != m_ueContexts.end())
++        it->second->lastActivity = utils::CurrentTimeMillis();
++}
++
++// Corre uma vez por segundo. Pede a libertação dos UEs sem tráfego do utilizador há mais tempo do que
++// o configurado. Só são considerados os UEs com sessão PDU, porque um UE a meio do registo ou do
++// estabelecimento da sessão ainda não tem contexto aqui: nunca é cortado a meio de um procedimento.
++void GtpTask::checkInactivity()
++{
++    const int64_t inactivityMs = static_cast<int64_t>(m_base->config->inactivityTimer) * 1000LL;
++    const int64_t minConnectionMs = static_cast<int64_t>(m_base->config->minConnectionTime) * 1000LL;
++    const int64_t now = utils::CurrentTimeMillis();
++
++    for (auto &item : m_ueContexts)
++    {
++        auto &ue = item.second;
++
++        if (now - ue->createdAt < minConnectionMs)
++            continue;
++        if (now - ue->lastActivity < inactivityMs)
++            continue;
++
++        m_logger->debug("UE[%d] inactive for %d seconds, requesting context release", ue->ueId,
++                        static_cast<int>((now - ue->lastActivity) / 1000LL));
++
++        // Evita repetir o pedido a cada segundo enquanto o core responde.
++        ue->lastActivity = now;
++
++        auto w = std::make_unique<NmGnbGtpToNgap>(NmGnbGtpToNgap::UE_INACTIVE);
++        w->ueId = ue->ueId;
++        m_base->ngapTask->push(std::move(w));
++    }
++}
++
+ void GtpTask::updateAmbrForUe(int ueId)
+ {
+     if (!m_ueContexts.count(ueId))
+diff --git a/src/gnb/gtp/task.hpp b/src/gnb/gtp/task.hpp
+index 6111b9b..6b55dde 100644
+--- a/src/gnb/gtp/task.hpp
++++ b/src/gnb/gtp/task.hpp
+@@ -52,6 +52,8 @@ class GtpTask : public NtsTask
+     void handleSessionCreate(PduSessionResource *session);
+     void handleSessionRelease(int ueId, int psi);
+     void handleUeContextDelete(int ueId);
++    void markActivity(int ueId);
++    void checkInactivity();
+     void handleUplinkData(int ueId, int psi, OctetString &&data);
+ 
+     void updateAmbrForUe(int ueId);
+diff --git a/src/gnb/ngap/task.cpp b/src/gnb/ngap/task.cpp
+index b0abae9..c1be980 100644
+--- a/src/gnb/ngap/task.cpp
++++ b/src/gnb/ngap/task.cpp
+@@ -69,6 +69,16 @@ void NgapTask::onLoop()
+         }
+         break;
+     }
++    case NtsMessageType::GNB_GTP_TO_NGAP: {
++        auto &w = dynamic_cast<NmGnbGtpToNgap &>(*msg);
++        switch (w.present)
++        {
++        case NmGnbGtpToNgap::UE_INACTIVE:
++            sendContextRelease(w.ueId, NgapCause::RadioNetwork_user_inactivity);
++            break;
++        }
++        break;
++    }
+     case NtsMessageType::GNB_SCTP: {
+         auto &w = dynamic_cast<NmGnbSctp &>(*msg);
+         switch (w.present)
+diff --git a/src/gnb/nts.hpp b/src/gnb/nts.hpp
+index ae328ee..3c83e15 100644
+--- a/src/gnb/nts.hpp
++++ b/src/gnb/nts.hpp
+@@ -239,6 +239,21 @@ struct NmGnbNgapToGtp : NtsMessage
+     }
+ };
+ 
++struct NmGnbGtpToNgap : NtsMessage
++{
++    enum PR
++    {
++        UE_INACTIVE,
++    } present;
++
++    // UE_INACTIVE
++    int ueId{};
++
++    explicit NmGnbGtpToNgap(PR present) : NtsMessage(NtsMessageType::GNB_GTP_TO_NGAP), present(present)
++    {
++    }
++};
++
+ struct NmGnbSctp : NtsMessage
+ {
+     enum PR
+diff --git a/src/gnb/types.hpp b/src/gnb/types.hpp
+index 042adb8..46c0ea0 100644
+--- a/src/gnb/types.hpp
++++ b/src/gnb/types.hpp
+@@ -277,6 +277,11 @@ struct GtpUeContext
+     const int ueId;
+     AggregateMaximumBitRate ueAmbr{};
+ 
++    // Temporizador de inatividade: instante do último pacote de dados do utilizador (qualquer direção)
++    // e instante em que o contexto foi criado. Em milissegundos, relógio monotónico.
++    int64_t lastActivity{};
++    int64_t createdAt{};
++
+     explicit GtpUeContext(const int ueId) : ueId(ueId)
+     {
+     }
+@@ -331,6 +336,8 @@ struct GnbConfig
+     std::string gtpIp{};
+     std::optional<std::string> gtpAdvertiseIp{};
+     bool ignoreStreamIds{};
++    int inactivityTimer{};    // segundos sem dados do utilizador até libertar o UE; 0 = desligado
++    int minConnectionTime{};  // segundos após a criação do contexto antes de a libertação ser possível
+     ECellAccessType cellAccessType{ECellAccessType::TerrestrialNr};
+ 
+     /* Assigned by program */
+diff --git a/src/utils/nts.hpp b/src/utils/nts.hpp
+index d363e9d..8bf25b8 100644
+--- a/src/utils/nts.hpp
++++ b/src/utils/nts.hpp
+@@ -44,6 +44,7 @@ enum class NtsMessageType
+     GNB_NGAP_TO_RRC,
+     GNB_RRC_TO_NGAP,
+     GNB_NGAP_TO_GTP,
++    GNB_GTP_TO_NGAP,
+     GNB_SCTP,
+ 
+     UE_APP_TO_TUN,

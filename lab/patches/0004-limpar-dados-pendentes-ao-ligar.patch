@@ -1,0 +1,88 @@
+Limpar o estado de dados de subida pendentes ao estabelecer a ligação
+
+NasSm::handleUplinkDataRequest() descarta o pacote que chega com o UE em
+CM-IDLE e guarda apenas o sinalizador uplinkPending, que serve para pedir a
+ligação (Service Request). Esse sinalizador só era limpo quando um pacote era
+ENVIADO já com a ligação estabelecida (src/ue/nas/sm/sap.cpp:67).
+
+Um dispositivo que transmita um único pacote de cada vez — o caso típico de um
+sensor — nunca envia nada com a ligação estabelecida, porque o pacote que
+pediu a ligação foi descartado. O sinalizador ficava preso a true e, ao voltar
+a idle, o pacote seguinte encontrava uplinkPending == true, não pedia ligação
+nenhuma e o dispositivo NUNCA MAIS ACORDAVA.
+
+Sintoma visível: `nr-cli <ue> -e ps-list` mostra "data-pending: true" com o UE
+em CM-IDLE, e não há mais nenhum Service Request no registo.
+
+Correção: limpar o estado ao entrar em CM-CONNECTED, porque a essa altura o
+pacote que o ativou já foi descartado e não há nada pendente.
+
+Medido no lab (2 dispositivos, um pacote de 20 em 20 s, temporizador de
+inatividade a 10 s, janela de 140 s):
+
+                        antes        depois
+  Ciclos idle/ativo       1            11     (um por dispositivo, e mais nada)
+
+Por corrigir no master do upstream (verificado em 2026-09-21).
+
+Nota: a causa raiz é o pacote ser descartado em vez de guardado. Guardá-lo e
+enviá-lo depois de a ligação estar pronta resolveria também a perda do
+primeiro pacote de cada transmissão, mas exige uma fila por sessão.
+
+diff --git a/src/ue/nas/mm/base.cpp b/src/ue/nas/mm/base.cpp
+index 87c32a1..c093406 100644
+--- a/src/ue/nas/mm/base.cpp
++++ b/src/ue/nas/mm/base.cpp
+@@ -404,6 +404,9 @@ void NasMm::onSwitchCmState(ECmState oldState, ECmState newState)
+ 
+     if (oldState == ECmState::CM_IDLE && newState == ECmState::CM_CONNECTED)
+     {
++        // O pacote que pediu esta ligação foi descartado, logo já não há dados pendentes.
++        m_sm->clearUplinkDataPending();
++
+         // "Timer T3512 is stopped when the UE enters 5GMM-CONNECTED mode over 3GPP access or the 5GMM-DEREGISTERED
+         // state over 3GPP access"
+         m_timers->t3512.stop();
+diff --git a/src/ue/nas/sm/resource.cpp b/src/ue/nas/sm/resource.cpp
+index b185fb2..14fe2ff 100644
+--- a/src/ue/nas/sm/resource.cpp
++++ b/src/ue/nas/sm/resource.cpp
+@@ -70,6 +70,26 @@ void NasSm::handleUplinkStatusChange(int psi, bool isPending)
+     m_mm->triggerMmCycle();
+ }
+ 
++// Limpa o estado "dados de subida pendentes" de todas as sessões.
++//
++// handleUplinkDataRequest() descarta o pacote que chega com o UE em CM-IDLE: guarda apenas o
++// sinalizador uplinkPending, que serve para pedir a ligação. O sinalizador só era limpo quando um
++// pacote era ENVIADO já com a ligação estabelecida, por isso um dispositivo que transmita um único
++// pacote de cada vez ficava com ele preso a true para sempre: ao voltar a idle, o pacote seguinte
++// encontrava uplinkPending == true, não pedia ligação nenhuma e o dispositivo nunca mais acordava.
++void NasSm::clearUplinkDataPending()
++{
++    for (int psi = 1; psi < 16; psi++)
++    {
++        auto *ps = m_pduSessions[psi];
++        if (ps && ps->uplinkPending)
++        {
++            ps->uplinkPending = false;
++            m_logger->debug("Uplink data status changed PSI[%d] pending[false]", psi);
++        }
++    }
++}
++
+ bool NasSm::anyUplinkDataPending()
+ {
+     // TODO: look for only resources are already established etc
+diff --git a/src/ue/nas/sm/sm.hpp b/src/ue/nas/sm/sm.hpp
+index 6134807..e1bfea1 100644
+--- a/src/ue/nas/sm/sm.hpp
++++ b/src/ue/nas/sm/sm.hpp
+@@ -47,6 +47,7 @@ class NasSm
+     void localReleaseAllSessions();
+     bool anyEmergencySession();
+     void handleUplinkStatusChange(int psi, bool isPending);
++    void clearUplinkDataPending();
+     bool anyUplinkDataPending();
+     bool anyEmergencyUplinkDataPending();
+     std::bitset<16> getUplinkDataStatus();
