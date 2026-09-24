@@ -33,11 +33,24 @@ docker compose down               # parar (o assinante fica no volume mongodb-da
 Capturar uma interface no host: `dumpcap -i br-n2 -w n2.pcapng` (sem sudo se o utilizador estiver no
 grupo `wireshark`), ou Wireshark na bridge.
 
-## Fork do UERANSIM (`patches/`)
+## Forks (`patches/`)
 
-O UERANSIM é compilado a partir do clone local (`../UERANSIM`), que está no ramo **`panic/v3.3.0`**
-(a partir da tag v3.3.0). As nossas alterações estão em `patches/`, uma por ficheiro, com a
-justificação no cabeçalho:
+Os dois projetos são compilados a partir dos clones locais, cada um no seu ramo. As nossas
+alterações estão em `patches/<projeto>/`, uma por ficheiro, com a justificação e os valores
+medidos no cabeçalho.
+
+| Projeto | Clone | Ramo | Publicado em |
+|---|---|---|---|
+| Open5GS | `../open5gs` | `panic/v2.8.0` | https://github.com/brunoacm4/Open5GS |
+| UERANSIM | `../UERANSIM` | `panic/v3.3.0` | https://github.com/brunoacm4/UERANSIM |
+
+### Open5GS (`patches/open5gs/`)
+
+| Patch | O que faz | Porquê |
+|---|---|---|
+| `0001-remover-ue-context-in-smf-data.patch` | O AMF deixa de pedir `ue-context-in-smf-data` à UDM durante o registo | A UDM responde sempre um objeto vazio e o AMF nunca lê a resposta. Medido: registo passa de 16 para 15 pedidos SBI e de 64 para 60 mensagens HTTP, sem alterar N1/N2/N3 |
+
+### UERANSIM (`patches/ueransim/`)
 
 | Patch | O que faz | Porquê |
 |---|---|---|
@@ -46,29 +59,26 @@ justificação no cabeçalho:
 | `0003-temporizador-de-inatividade-no-gnb.patch` | Acrescenta ao gNB um temporizador de inatividade: liberta o contexto do UE ao fim de N segundos sem tráfego do utilizador (causa NGAP `user inactivity`) | Sem isto o UE nunca vai a CM-IDLE e os procedimentos do ciclo de inatividade não existem. **Desligado por omissão** (`inactivityTimer: 0`), para não alterar as medições já feitas; liga-se na variante `idle` |
 | `0004-limpar-dados-pendentes-ao-ligar.patch` | Limpa o estado "dados de subida pendentes" ao entrar em CM-CONNECTED | Sem isto um dispositivo que transmita um pacote de cada vez só acorda **uma vez**: o sinalizador fica preso a `true` e os pacotes seguintes já não pedem ligação. Sintoma: `ps-list` mostra `data-pending: true` com o UE em CM-IDLE. Por corrigir no upstream |
 
-O ramo está publicado em **https://github.com/brunoacm4/UERANSIM** (fork de `aligungr/UERANSIM`),
-ramo `panic/v3.3.0`, commit `0e29cfd`.
-
-A partir de uma máquina limpa:
+### Montar a partir de uma máquina limpa
 
 ```bash
+git clone -b panic/v2.8.0 https://github.com/brunoacm4/Open5GS.git open5gs
 git clone -b panic/v3.3.0 https://github.com/brunoacm4/UERANSIM.git UERANSIM
-cd lab && docker compose build gnb           # a mesma imagem serve gNB e UE
+cd lab && docker compose build
 ```
 
-Ou, partindo de um clone do upstream, aplicando os patches à mão:
+Ou, partindo dos clones do upstream, aplicando os patches à mão:
 
 ```bash
-cd ../UERANSIM
-git checkout -b panic/v3.3.0 v3.3.0
-git apply ../lab/patches/0001-reverter-selecao-amf-por-slice.patch
-git apply ../lab/patches/0002-ngksi-no-registo-de-mobilidade.patch
-git apply ../lab/patches/0003-temporizador-de-inatividade-no-gnb.patch
-git apply ../lab/patches/0004-limpar-dados-pendentes-ao-ligar.patch
-cd ../lab && docker compose build gnb
+cd ../open5gs && git checkout -b panic/v2.8.0 v2.8.0
+for p in ../lab/patches/open5gs/*.patch; do git apply "$p"; done
+cd ../UERANSIM && git checkout -b panic/v3.3.0 v3.3.0
+for p in ../lab/patches/ueransim/*.patch; do git apply "$p"; done
+cd ../lab && docker compose build
 ```
 
-Verificação após aplicar: uma corrida de registo tem de continuar a dar **9 NGAP e 16 pedidos SBI**.
+Verificação: uma corrida de registo tem de dar **9 mensagens NGAP e 15 pedidos SBI**
+(eram 16 antes do patch 0001 do Open5GS).
 
 ## Variantes
 

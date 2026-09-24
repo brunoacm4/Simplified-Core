@@ -124,13 +124,27 @@ def main(pcap):
             k, s, cpu, mem = l.split('\t')
             rec.setdefault(s, {})[k] = (int(cpu), int(mem))
         core = [s for s in rec if s not in ('ue', 'gnb', 'mongodb') and 'I' in rec[s] and 'F' in rec[s]]
+        cpu_janela = sum(rec[s]['F'][0] - rec[s]['I'][0] for s in core) / 1000
         M['recursos_core'] = {
             'n_servicos': len(core),
-            'cpu_ms_janela': round(sum(rec[s]['F'][0] - rec[s]['I'][0] for s in core) / 1000, 1),
+            'cpu_ms_janela': round(cpu_janela, 1),
             'mem_mib_fim': round(sum(rec[s]['F'][1] for s in core) / 2**20, 1),
             'cpu_ms_por_servico': {s: round((rec[s]['F'][0] - rec[s]['I'][0]) / 1000, 1)
                                    for s in sorted(core)},
         }
+        # Janela em repouso (dispositivos a dormir, sem tráfego): separa o que o core gasta por
+        # existir do que gasta por causa dos dispositivos.
+        if all('R' in rec[s] for s in core) and 't_repouso' in meta:
+            repouso_s = t0 - float(meta['t_repouso'])
+            cpu_repouso = sum(rec[s]['I'][0] - rec[s]['R'][0] for s in core) / 1000
+            M['recursos_core']['repouso_s'] = round(repouso_s, 1)
+            M['recursos_core']['cpu_ms_repouso'] = round(cpu_repouso, 1)
+            M['recursos_core']['mem_mib_repouso'] = round(sum(rec[s]['I'][1] for s in core) / 2**20, 1)
+            if repouso_s > 0:
+                # CPU atribuível aos procedimentos: o que se gastou na janela menos o que se teria
+                # gasto na mesma janela sem tráfego nenhum.
+                M['recursos_core']['cpu_ms_liquida'] = round(
+                    cpu_janela - cpu_repouso * janela_s / repouso_s, 1)
 
     # --- normalizado por dispositivo e por hora ---
     M['por_dispositivo_hora'] = {
@@ -142,6 +156,12 @@ def main(pcap):
     if 'recursos_core' in M:
         M['por_dispositivo_hora']['cpu_ms'] = round(
             M['recursos_core']['cpu_ms_janela'] * por_disp_hora, 1)
+        if 'cpu_ms_liquida' in M['recursos_core']:
+            M['por_dispositivo_hora']['cpu_ms_liquida'] = round(
+                M['recursos_core']['cpu_ms_liquida'] * por_disp_hora, 1)
+            if M['procedimentos']['total']:
+                M['cpu_ms_por_procedimento'] = round(
+                    M['recursos_core']['cpu_ms_liquida'] / M['procedimentos']['total'], 2)
 
     json.dump(M, open(f'{pasta}/{base}.fabrica.json', 'w'), indent=1, ensure_ascii=False)
 
@@ -159,6 +179,10 @@ def main(pcap):
         r = M['recursos_core']
         print(f"core ({r['n_servicos']} serviços): {r['cpu_ms_janela']} ms de CPU na janela, "
               f"{r['mem_mib_fim']} MiB de memória")
+        if 'cpu_ms_liquida' in r:
+            print(f"  em repouso: {r['cpu_ms_repouso']} ms em {r['repouso_s']}s, {r['mem_mib_repouso']} MiB"
+                  f" | CPU atribuível aos procedimentos: {r['cpu_ms_liquida']} ms"
+                  f" ({M.get('cpu_ms_por_procedimento')} ms por procedimento)")
     print(f"bytes na janela: {dict(bytes_if)}")
 
 

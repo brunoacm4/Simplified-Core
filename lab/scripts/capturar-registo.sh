@@ -73,8 +73,8 @@ done
 cat > "$OUT/$NAME.meta" <<EOF
 variante=$VARIANTE
 data=$(date -Iseconds)
-open5gs=$(git -C ../open5gs describe --tags)
-ueransim=$(git -C ../UERANSIM describe --tags)
+open5gs=$(git -C ../open5gs describe --tags --always --dirty)/$(git -C ../open5gs branch --show-current)
+ueransim=$(git -C ../UERANSIM describe --tags --always --dirty)/$(git -C ../UERANSIM branch --show-current)
 compose_file=$COMPOSE_FILE
 espera_core=$ESPERA_CORE
 janela=$JANELA

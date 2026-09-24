@@ -24,6 +24,15 @@ PERIODO=${PERIODO:-30}            # segundos entre transmissões de cada disposi
 DURACAO=${DURACAO:-300}           # duração da janela de medição, em segundos
 ESPERA_CORE=${ESPERA_CORE:-25}    # segundos entre o arranque do core e os UEs
 ESPERA_REGISTO=${ESPERA_REGISTO:-180}  # tempo máximo à espera que todos os UEs tenham sessão
+# Janela em repouso (dispositivos registados e a dormir) antes do tráfego. Por omissão é um quarto
+# da janela de medição, entre 60 e 300 s: com 60 s fixos, extrapolar o custo de fundo para uma janela
+# de 30 minutos tinha erro maior do que o próprio valor que se quer medir.
+REPOUSO=${REPOUSO:-0}
+if [ "$REPOUSO" -eq 0 ]; then
+    REPOUSO=$((DURACAO / 4))
+    [ "$REPOUSO" -lt 60 ] && REPOUSO=60
+    [ "$REPOUSO" -gt 300 ] && REPOUSO=300
+fi
 
 if [ "$VARIANTE" = baseline ]; then
     export COMPOSE_FILE=docker-compose.yml:variantes/idle/compose.yml
@@ -33,6 +42,7 @@ fi
 mkdir -p "$OUT/$NAME-logs"
 
 CORE=$(docker compose config --services | grep -vx ue | tr '\n' ' ')
+TEMPORIZADOR=$(awk '/^inactivityTimer:/{print $2}' variantes/idle/config/ueransim/gnb.yaml)
 
 snap() {
     for s in $(docker compose ps --services --status running); do
@@ -69,6 +79,12 @@ prontos=$(docker compose logs ue 2>/dev/null | grep -c "PDU Session establishmen
 # Deixar os dispositivos adormecer antes de medir: sem isto a janela apanhava a cauda do arranque.
 sleep 20
 
+# Janela em repouso: dispositivos registados e a dormir, sem tráfego nenhum. Serve para separar o
+# que o core gasta por existir (heartbeats, temporizadores) do que gasta por causa dos dispositivos.
+T_REPOUSO=$(date +%s.%N)
+snap R
+sleep "$REPOUSO"
+
 T_INICIO=$(date +%s.%N)
 snap I
 docker compose exec -T ue sh -s "$PERIODO" "$DURACAO" < scripts/trafego.sh >/dev/null 2>&1 || true
@@ -85,13 +101,16 @@ cat > "$OUT/$NAME.meta" <<EOF
 cenario=fabrica
 variante=$VARIANTE
 data=$(date -Iseconds)
-open5gs=$(git -C ../open5gs describe --tags)
-ueransim=$(git -C ../UERANSIM describe --tags --always)
+open5gs=$(git -C ../open5gs describe --tags --always --dirty)/$(git -C ../open5gs branch --show-current)
+ueransim=$(git -C ../UERANSIM describe --tags --always --dirty)/$(git -C ../UERANSIM branch --show-current)
 compose_file=$COMPOSE_FILE
 n_ues=$N_UES
 periodo=$PERIODO
+temporizador=$TEMPORIZADOR
 duracao=$DURACAO
 ues_prontos=$prontos
+t_repouso=$T_REPOUSO
+repouso=$REPOUSO
 t_inicio=$T_INICIO
 t_fim=$T_FIM
 servicos_core=$CORE

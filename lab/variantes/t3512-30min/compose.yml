@@ -1,0 +1,10 @@
+# Variante T3512 = 30 min (candidato C10a): o AMF dá aos dispositivos um T3512 acima do período a que
+# transmitem. Como cada transmissão reinicia o temporizador, um dispositivo que transmita mais depressa
+# do que o T3512 nunca faz registos periódicos. Só configuração.
+#
+# Uso (a partir de lab/), por cima do compose da baseline:
+#   docker compose -f docker-compose.yml -f variantes/t3512-30min/compose.yml up -d
+
+services:
+  amf:
+    volumes: [ ./variantes/t3512-30min/config/open5gs/amf.yaml:/etc/open5gs/amf.yaml:ro ]
