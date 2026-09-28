@@ -52,10 +52,16 @@ def main(pcap):
     t0, t1 = float(meta['t_inicio']), float(meta['t_fim'])
     n_ues = int(meta['ues_prontos'] or meta['n_ues'])
     janela_s = t1 - t0
-    # fator de normalização: de "na janela" para "por dispositivo e por hora"
-    por_disp_hora = 3600.0 / (janela_s * n_ues) if n_ues and janela_s > 0 else 0
+    # As taxas por hora usam a janela do TRÁFEGO: a duração pedida mais o temporizador de inatividade
+    # (a última transmissão ainda provoca uma libertação até esse tempo depois). O gerador de tráfego
+    # garante que termina à hora certa; a janela medida (t_fim - t_inicio) pode ficar maior se o
+    # docker exec ou a leitura de recursos demorarem a devolver, e isso subestimaria as taxas.
+    # A janela medida continua a ser a certa para o CPU, que desconta o fundo durante todo o tempo.
+    janela_trafego_s = min(janela_s, int(meta['duracao']) + int(meta.get('temporizador') or 0))
+    por_disp_hora = 3600.0 / (janela_trafego_s * n_ues) if n_ues and janela_trafego_s > 0 else 0
 
-    M = {'meta': meta, 'janela_s': round(janela_s, 1), 'n_dispositivos': n_ues,
+    M = {'meta': meta, 'janela_s': round(janela_s, 1), 'janela_trafego_s': janela_trafego_s,
+         'n_dispositivos': n_ues,
          'periodo_s': int(meta['periodo'])}
 
     # --- NGAP: mensagens e procedimentos ---

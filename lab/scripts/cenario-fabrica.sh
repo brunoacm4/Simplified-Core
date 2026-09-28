@@ -20,7 +20,7 @@ cd "$(dirname "$0")/.."
 OUT=$(realpath "$1"); NAME=$2
 VARIANTE=${VARIANTE:-baseline}    # variante do CORE (baseline, sem-scp, ...); o 'idle' é sempre aplicado
 export N_UES=${N_UES:-20}
-PERIODO=${PERIODO:-30}            # segundos entre transmissões de cada dispositivo
+PERIODO=${PERIODO:-30}            # segundos entre transmissões de cada dispositivo; 0 = sem tráfego
 DURACAO=${DURACAO:-300}           # duração da janela de medição, em segundos
 ESPERA_CORE=${ESPERA_CORE:-25}    # segundos entre o arranque do core e os UEs
 ESPERA_REGISTO=${ESPERA_REGISTO:-180}  # tempo máximo à espera que todos os UEs tenham sessão
@@ -87,7 +87,13 @@ sleep "$REPOUSO"
 
 T_INICIO=$(date +%s.%N)
 snap I
-docker compose exec -T ue sh -s "$PERIODO" "$DURACAO" < scripts/trafego.sh >/dev/null 2>&1 || true
+if [ "$PERIODO" -eq 0 ]; then
+    # Sem tráfego de dados: os dispositivos só acordam por iniciativa própria (registo periódico).
+    # Serve para medir o custo do registo periódico isoladamente, com um T3512 curto.
+    sleep "$DURACAO"
+else
+    docker compose exec -T ue sh -s "$PERIODO" "$DURACAO" < scripts/trafego.sh >/dev/null 2>&1 || true
+fi
 snap F
 T_FIM=$(date +%s.%N)
 

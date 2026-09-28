@@ -1,0 +1,10 @@
+# Variante T3512 = 60 s: dispositivos adormecidos fazem um registo periódico a cada minuto. Não é uma
+# configuração para usar numa rede — serve para gerar registos periódicos densos e medir quanto custa
+# cada um ao core, que com os valores normais (9 min ou mais) é um sinal demasiado fraco para se medir.
+# Só configuração.
+#
+# Uso: VARIANTE=t3512-60s PERIODO=0 ./scripts/cenario-fabrica.sh <pasta> <nome>
+
+services:
+  amf:
+    volumes: [ ./variantes/t3512-60s/config/open5gs/amf.yaml:/etc/open5gs/amf.yaml:ro ]

@@ -1,0 +1,9 @@
+# Variante SMF sem Diameter: retira a linha freeDiameter do smf.yaml. O Diameter (interfaces Gx, Gy,
+# Rx e S6b) é do EPC e não é usado numa rede 5G pura; o SMF inicializa-o na mesma se estiver
+# configurado. Serve para medir quanta memória fixa do SMF vem daí. Só configuração.
+#
+# Uso: docker compose -f docker-compose.yml -f variantes/smf-sem-diameter/compose.yml up -d
+
+services:
+  smf:
+    volumes: [ ./variantes/smf-sem-diameter/config/open5gs/smf.yaml:/etc/open5gs/smf.yaml:ro ]
