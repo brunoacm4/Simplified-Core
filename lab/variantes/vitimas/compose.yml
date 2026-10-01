@@ -1,0 +1,23 @@
+# Contentor de VÍTIMAS: dispositivos que o cenário desliga de repente (docker kill), sem se
+# desregistarem, como um sensor que avaria ou fica sem bateria. Serve para medir quanto tempo o core
+# leva a dar por isso (temporizadores de alcançabilidade do AMF, T3512 + 4 min e outra vez + 4 min).
+#
+# IMSIs a partir de 999700000000021, a seguir aos 20 do contentor 'ue'. Sem 'restart': depois do
+# docker kill o contentor tem de ficar morto, ou as vítimas voltavam a registar-se.
+#
+# Uso: VITIMAS="30:2 900:2" ./scripts/cenario-fabrica.sh <pasta> <nome>
+#      (o cenário acrescenta este ficheiro e define N_VITIMAS)
+
+services:
+  vitimas:
+    image: core-simplified/ueransim:v3.3.0
+    command: nr-ue -c /etc/ueransim/ue.yaml -n ${N_VITIMAS:-4}
+    volumes: [ ./variantes/vitimas/config/ueransim/ue.yaml:/etc/ueransim/ue.yaml:ro ]
+    depends_on: [ gnb ]
+    cap_add: [ NET_ADMIN ]
+    devices: [ /dev/net/tun:/dev/net/tun ]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: 1
+      net.ipv6.conf.default.disable_ipv6: 1
+    networks:
+      ran: { ipv4_address: 10.100.5.61 }

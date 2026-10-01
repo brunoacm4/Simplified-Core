@@ -62,7 +62,8 @@ def main(pcap):
 
     M = {'meta': meta, 'janela_s': round(janela_s, 1), 'janela_trafego_s': janela_trafego_s,
          'n_dispositivos': n_ues,
-         'periodo_s': int(meta['periodo'])}
+         # população mista (POPULACAO): fica a especificação, "30:10 900:10"
+         'periodo_s': meta.get('populacao') or int(meta['periodo'])}
 
     # --- NGAP: mensagens e procedimentos ---
     ngap_msgs = 0
@@ -129,7 +130,8 @@ def main(pcap):
         for l in open(rp):
             k, s, cpu, mem = l.split('\t')
             rec.setdefault(s, {})[k] = (int(cpu), int(mem))
-        core = [s for s in rec if s not in ('ue', 'gnb', 'mongodb') and 'I' in rec[s] and 'F' in rec[s]]
+        core = [s for s in rec if s not in ('ue', 'vitimas', 'gnb', 'mongodb')
+                and 'I' in rec[s] and 'F' in rec[s]]
         cpu_janela = sum(rec[s]['F'][0] - rec[s]['I'][0] for s in core) / 1000
         M['recursos_core'] = {
             'n_servicos': len(core),
@@ -139,13 +141,16 @@ def main(pcap):
                                    for s in sorted(core)},
         }
         # Janela em repouso (dispositivos a dormir, sem tráfego): separa o que o core gasta por
-        # existir do que gasta por causa dos dispositivos.
-        if all('R' in rec[s] for s in core) and 't_repouso' in meta:
-            repouso_s = t0 - float(meta['t_repouso'])
-            cpu_repouso = sum(rec[s]['I'][0] - rec[s]['R'][0] for s in core) / 1000
+        # existir do que gasta por causa dos dispositivos. Acaba no início da janela ou, com
+        # aprendizagem (APRENDIZAGEM), no snapshot A, antes do tráfego da aprendizagem.
+        fim = 'A' if meta.get('t_aprendizagem') else 'I'
+        t_fim_repouso = float(meta['t_aprendizagem']) if fim == 'A' else t0
+        if all('R' in rec[s] and fim in rec[s] for s in core) and 't_repouso' in meta:
+            repouso_s = t_fim_repouso - float(meta['t_repouso'])
+            cpu_repouso = sum(rec[s][fim][0] - rec[s]['R'][0] for s in core) / 1000
             M['recursos_core']['repouso_s'] = round(repouso_s, 1)
             M['recursos_core']['cpu_ms_repouso'] = round(cpu_repouso, 1)
-            M['recursos_core']['mem_mib_repouso'] = round(sum(rec[s]['I'][1] for s in core) / 2**20, 1)
+            M['recursos_core']['mem_mib_repouso'] = round(sum(rec[s][fim][1] for s in core) / 2**20, 1)
             if repouso_s > 0:
                 # CPU atribuível aos procedimentos: o que se gastou na janela menos o que se teria
                 # gasto na mesma janela sem tráfego nenhum.
@@ -173,7 +178,7 @@ def main(pcap):
 
     p = M['procedimentos']
     print(f"=== {base} (fabrica/{meta['variante']}) ===")
-    print(f"{n_ues} dispositivos, periodo {meta['periodo']}s, janela {janela_s:.0f}s")
+    print(f"{n_ues} dispositivos, periodo {M['periodo_s']}s, janela {janela_s:.0f}s")
     print(f"procedimentos: {p['total']} "
           f"(service request {p['service_request']}, registo periódico {p['registo_periodico']}, "
           f"libertação {p['libertacao']})")

@@ -9,6 +9,10 @@
 # desfasamento inicial aleatório para os dispositivos não transmitirem todos no mesmo instante
 # (numa fábrica real não estão sincronizados, e sincronizá-los criaria picos artificiais).
 #
+# <periodo> é um número, igual para todos os túneis, ou uma lista túnel=período separada por
+# vírgulas (ex.: uesimtun0=30,uesimtun1=900), para dispositivos com ritmos diferentes; quem a
+# constrói é o cenario-fabrica.sh (POPULACAO). Túneis fora da lista não transmitem.
+#
 # TODO: passar de ping para UDP só de subida. Um sensor real só envia; o ping gera resposta,
 # logo há tráfego também na descida. Não afeta o temporizador de inatividade (as duas direções
 # acontecem no mesmo instante), mas é menos realista em bytes e em número de pacotes.
@@ -32,12 +36,17 @@ espera() {
 }
 
 for IF in $(ls /sys/class/net | grep '^uesimtun'); do
+    case "$PERIODO" in
+        *=*) P=$(echo "$PERIODO" | tr ',' '\n' | sed -n "s/^$IF=//p") ;;
+        *)   P=$PERIODO ;;
+    esac
+    [ -n "$P" ] || continue
     (
-        # desfasamento inicial: 0..PERIODO segundos
-        espera $(( $(od -An -N2 -tu2 < /dev/urandom | tr -d ' ') % PERIODO )) || exit 0
+        # desfasamento inicial: 0..P segundos
+        espera $(( $(od -An -N2 -tu2 < /dev/urandom | tr -d ' ') % P )) || exit 0
         while [ "$(date +%s)" -lt "$FIM" ]; do
             ping -c 1 -W 2 -q -I "$IF" "$DESTINO" >/dev/null 2>&1
-            espera "$PERIODO" || break
+            espera "$P" || break
         done
     ) </dev/null >/dev/null 2>&1 &
 done

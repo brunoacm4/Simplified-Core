@@ -49,6 +49,7 @@ medidos no cabeçalho.
 | Patch | O que faz | Porquê |
 |---|---|---|
 | `0001-remover-ue-context-in-smf-data.patch` | O AMF deixa de pedir `ue-context-in-smf-data` à UDM durante o registo | A UDM responde sempre um objeto vazio e o AMF nunca lê a resposta. Medido: registo passa de 16 para 15 pedidos SBI e de 64 para 60 mensagens HTTP, sem alterar N1/N2/N3 |
+| `0002-t3512-dinamico.patch` | T3512 por dispositivo: com `amf.time.t3512.dynamic`, cada registo periódico é respondido com o dobro do valor, até `max` (1 hora); os temporizadores de alcançabilidade acompanham o valor de cada dispositivo | Numa fábrica com dispositivos de ritmos diferentes nenhum T3512 fixo serve a todos: baixo gasta rádio em registos periódicos nos lentos, alto atrasa a deteção de dispositivos mortos. TS 23.501 §5.3.2 (valor por UE, política local). **Desligado por omissão** |
 
 ### UERANSIM (`patches/ueransim/`)
 
@@ -89,6 +90,11 @@ compose adicional (`docker compose -f docker-compose.yml -f variantes/<nome>/com
 |---|---|---|
 | `sem-scp` | Sem SCP: as NFs falam diretamente entre si e usam a NRF (modelo B, TS 23.501 Anexo E) | Não (só configuração) |
 | `idle` | `inactivityTimer: 10` no gNB: os UEs adormecem 10 s depois do último pacote e acordam com um Service Request. Exercita o ciclo de inatividade | Sim (patch 0003 no UERANSIM) |
+| `t3512-30min` | T3512 de 30 min, acima do período de reporte dos dispositivos (candidato C10a) | Não (só configuração) |
+| `t3512-60s` | T3512 de 1 min, para gerar registos periódicos densos e medir o custo de cada um | Não (só configuração) |
+| `smf-sem-diameter` | SMF sem a ligação Diameter (freeDiameter) do EPC | Não (só configuração) |
+| `t3512-dinamico` | Cada dispositivo começa com T3512 de 9 min; a cada registo periódico o AMF duplica-lhe o valor, até 1 hora (`amf.time.t3512.dynamic`/`max`) | Sim (patch do T3512 dinâmico no Open5GS) |
+| `vitimas` | Não é uma variante do core: contentor extra de UEs (IMSIs a partir de …021) que o cenário "fábrica" desliga de repente para medir o tempo de deteção. Ligado com `VITIMAS=` | Não |
 
 ## Medições
 
@@ -105,6 +111,11 @@ compose adicional (`docker compose -f docker-compose.yml -f variantes/<nome>/com
 [VARIANTE=sem-scp] N_UES=20 PERIODO=30 DURACAO=300 \
   ./scripts/cenario-fabrica.sh <pasta> corrida1
 ./scripts/analisar-fabrica.py <pasta>/corrida1.pcapng    # -> corrida1.fabrica.json
+
+# população mista, fase de aprendizagem e vítimas (experiência do T3512 dinâmico)
+VARIANTE=t3512-dinamico N_UES=20 POPULACAO="30:10 900:10" APRENDIZAGEM=1800 DURACAO=3600 \
+  VITIMAS="30:2 900:2" ./scripts/cenario-fabrica.sh <pasta> corrida1
+./scripts/analisar-t3512.py <pasta>/corrida1.meta          # por classe e vítimas -> corrida1.t3512.json
 ```
 
 **Dois cenários:**

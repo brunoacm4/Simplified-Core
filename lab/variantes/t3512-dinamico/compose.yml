@@ -1,0 +1,12 @@
+# Variante T3512 dinâmico: cada dispositivo começa com o T3512 da baseline (9 min) e, sempre que faz
+# um registo periódico (sinal de que dorme mais do que o seu T3512), o AMF responde-lhe com o dobro,
+# até 1 hora. Os dispositivos que transmitem mais depressa do que o T3512 nunca o disparam e ficam
+# nos 9 min, com deteção rápida se morrerem.
+#
+# Exige o Open5GS do ramo panic/v2.8.0 com o patch do T3512 dinâmico (amf.time.t3512.dynamic).
+#
+# Uso: VARIANTE=t3512-dinamico ./scripts/cenario-fabrica.sh <pasta> <nome>
+
+services:
+  amf:
+    volumes: [ ./variantes/t3512-dinamico/config/open5gs/amf.yaml:/etc/open5gs/amf.yaml:ro ]
