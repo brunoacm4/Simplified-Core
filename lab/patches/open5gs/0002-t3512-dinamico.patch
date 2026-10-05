@@ -1,0 +1,337 @@
+T3512 dinâmico no AMF (fase 1)
+
+O AMF passa a guardar um T3512 por UE. Com amf.time.t3512.dynamic ligado,
+cada registo periódico de um UE, sinal de que ele dorme mais do que o seu
+T3512, é respondido com o dobro do valor, arredondado para cima para um
+valor que o GPRS Timer 3 represente e limitado a amf.time.t3512.max (por
+omissão 3600 s). Um registo inicial volta ao valor global. Os temporizadores
+de alcançabilidade (T3512 + 4 min) passam a usar o valor de cada UE.
+
+TS 23.501 5.3.2: o AMF atribui o T3512 a cada UE segundo políticas locais.
+Nenhuma mensagem muda, só o valor de um campo que já vai no Registration
+Accept. Desligado por omissão: sem a opção, o comportamento é o do Open5GS
+original.
+
+Configuração (amf.yaml):
+
+  time:
+    t3512:
+      value: 540
+      dynamic: true
+      max: 3600
+
+Medido no lab (10 sensores a transmitir a cada 30 s e 10 a cada 15 min,
+janela de 1 h depois de 30 min de aprendizagem), contra os valores fixos
+de 9 e 30 min:
+
+                                        9 min fixo  30 min fixo  dinâmico
+  Registos periódicos, sensor lento/h        4           0          0
+  Desregisto de um rápido morto (máx.)    26 min      68 min     26 min
+  Desregisto de um lento morto (máx.)     26 min      68 min     44 min
+
+O máximo limita o T3512, não a deteção: um UE no máximo de 1 h só é
+desregistado ao fim de 2 x (60 + 4) = 128 min.
+
+Commit e2629ba0a no ramo panic/v2.8.0 do fork.
+
+diff --git a/src/amf/context.c b/src/amf/context.c
+index 1035cf7b9..830f7aff0 100644
+--- a/src/amf/context.c
++++ b/src/amf/context.c
+@@ -126,6 +126,10 @@ static int amf_context_prepare(void)
+ 
+     self.ngap_port = OGS_NGAP_SCTP_PORT;
+ 
++    /* PANIC: T3512 dinâmico desligado; se ligado, no máximo 1 hora */
++    self.time.t3512.dynamic = false;
++    self.time.t3512.max = 3600;
++
+     return OGS_OK;
+ }
+ 
+@@ -197,6 +201,21 @@ static int amf_context_validation(void)
+         ogs_error("Not support GPRS Timer 3 [%d]", (int)self.time.t3512.value);
+         return OGS_ERROR;
+     }
++    if (self.time.t3512.dynamic) {
++        /* PANIC: o valor ajustado nunca passa do máximo, que tem de caber
++         * no Registration Accept */
++        if (self.time.t3512.max < self.time.t3512.value) {
++            ogs_error("amf.time.t3512.max [%d] below value [%d]",
++                    (int)self.time.t3512.max, (int)self.time.t3512.value);
++            return OGS_ERROR;
++        }
++        if (ogs_nas_gprs_timer_3_from_sec(
++                    &gprs_timer, self.time.t3512.max) != OGS_OK) {
++            ogs_error("Not support GPRS Timer 3 [%d]",
++                    (int)self.time.t3512.max);
++            return OGS_ERROR;
++        }
++    }
+ 
+     return OGS_OK;
+ }
+@@ -1049,6 +1068,14 @@ int amf_context_parse_config(void)
+                                     const char *v = ogs_yaml_iter_value(&t3512_iter);
+                                     if (v)
+                                         self.time.t3512.value = atoll(v);
++                                } else if (!strcmp(t3512_key, "dynamic")) {
++                                    /* PANIC: T3512 dinâmico */
++                                    self.time.t3512.dynamic =
++                                        ogs_yaml_iter_bool(&t3512_iter);
++                                } else if (!strcmp(t3512_key, "max")) {
++                                    const char *v = ogs_yaml_iter_value(&t3512_iter);
++                                    if (v)
++                                        self.time.t3512.max = atoll(v);
+                                 } else
+                                     ogs_warn("unknown key `%s`", t3512_key);
+                             }
+@@ -1669,6 +1696,9 @@ amf_ue_t *amf_ue_add(ran_ue_t *ran_ue)
+     }
+     amf_ue->implicit_deregistration.pkbuf = NULL;
+ 
++    /* PANIC: cada UE começa com o T3512 global */
++    amf_ue->t3512_value = self.time.t3512.value;
++
+     /* SBI Type */
+     amf_ue->sbi.type = OGS_SBI_OBJ_UE_TYPE;
+ 
+diff --git a/src/amf/context.h b/src/amf/context.h
+index 77997bcce..425f2827a 100644
+--- a/src/amf/context.h
++++ b/src/amf/context.h
+@@ -127,7 +127,20 @@ typedef struct amf_context_s {
+     struct {
+         struct {
+             ogs_time_t value;       /* Timer Value(Seconds) */
+-        } t3502, t3512;
++        } t3502;
++        struct {
++            ogs_time_t value;       /* Timer Value(Seconds) */
++
++            /*
++             * PANIC: T3512 dinâmico. Quando ligado, cada UE que faz um registo
++             * periódico recebe um T3512 duplicado (até ao máximo): se fez o
++             * registo periódico é porque dorme mais do que o seu T3512.
++             * TS 23.501 5.3.2: o AMF atribui o valor a cada UE segundo
++             * políticas locais.
++             */
++            bool dynamic;           /* ajustar o valor de cada UE */
++            ogs_time_t max;         /* limite do valor ajustado (segundos) */
++        } t3512;
+     } time;
+ 
+ } amf_context_t;
+@@ -644,6 +657,13 @@ struct amf_ue_s {
+         uint32_t        retry_count;;
+     } t3513, t3522, t3550, t3555, t3560, t3570, mobile_reachable, implicit_deregistration;
+ 
++    /*
++     * PANIC: T3512 atribuído a este UE (segundos). É o que vai no Registration
++     * Accept e a base dos temporizadores de alcançabilidade (+ 240 s).
++     * Começa no valor global; só muda com amf.time.t3512.dynamic ligado.
++     */
++    ogs_time_t t3512_value;
++
+     /* UE Radio Capability */
+     OCTET_STRING_t  ueRadioCapability;
+ 
+diff --git a/src/amf/gmm-build.c b/src/amf/gmm-build.c
+index 9bf003ec1..8d7ec5ae9 100644
+--- a/src/amf/gmm-build.c
++++ b/src/amf/gmm-build.c
+@@ -130,9 +130,10 @@ ogs_pkbuf_t *gmm_build_registration_accept(amf_ue_t *amf_ue)
+         ims_voice_over_ps_session_over_3gpp_access_indicator = 1;
+ 
+     /* Set T3512 : Mandatory in Open5GS */
+-    ogs_assert(amf_self()->time.t3512.value);
++    /* PANIC: o valor deste UE (gmm_update_t3512), não o global */
++    ogs_assert(amf_ue->t3512_value);
+     rv = ogs_nas_gprs_timer_3_from_sec(
+-            &t3512_value->t, amf_self()->time.t3512.value);
++            &t3512_value->t, amf_ue->t3512_value);
+     ogs_assert(rv == OGS_OK);
+     registration_accept->presencemask |=
+         OGS_NAS_5GS_REGISTRATION_ACCEPT_T3512_VALUE_PRESENT;
+diff --git a/src/amf/gmm-handler.c b/src/amf/gmm-handler.c
+index fa01e53f2..83e2e77db 100644
+--- a/src/amf/gmm-handler.c
++++ b/src/amf/gmm-handler.c
+@@ -34,6 +34,8 @@ static ogs_nas_5gmm_cause_t gmm_handle_nas_message_container(
+ 
+ static uint8_t gmm_cause_from_access_control(ogs_plmn_id_t *plmn_id);
+ 
++static void gmm_update_t3512(amf_ue_t *amf_ue);
++
+ ogs_nas_5gmm_cause_t gmm_handle_registration_request(amf_ue_t *amf_ue,
+         ogs_nas_security_header_type_t h, NGAP_ProcedureCode_t ngap_code,
+         ogs_nas_5gs_registration_request_t *registration_request)
+@@ -369,6 +371,15 @@ ogs_nas_5gmm_cause_t gmm_handle_registration_request(amf_ue_t *amf_ue,
+         return OGS_5GMM_CAUSE_5GS_SERVICES_NOT_ALLOWED;
+     }
+ 
++    /*
++     * PANIC: escolher o T3512 que vai no Registration Accept deste registo.
++     * Esta função corre uma vez por Registration Request recebido (o pedido
++     * dentro do NAS message container vai para gmm_handle_registration_update)
++     * e o Accept é construído depois; as retransmissões do T3550 reenviam o
++     * mesmo Accept. A regra aplica-se, portanto, uma vez por registo.
++     */
++    gmm_update_t3512(amf_ue);
++
+     return OGS_5GMM_CAUSE_REQUEST_ACCEPTED;
+ }
+ 
+@@ -1918,3 +1929,55 @@ static uint8_t gmm_cause_from_access_control(ogs_plmn_id_t *plmn_id)
+ 
+     return OGS_5GMM_CAUSE_PLMN_NOT_ALLOWED;
+ }
++
++/*
++ * PANIC: T3512 dinâmico (fase 1).
++ *
++ * Um registo periódico só acontece se o UE dormir mais do que o seu T3512.
++ * Quando isso acontece, o AMF responde-lhe com o dobro do valor, arredondado
++ * para cima para um valor que o GPRS Timer 3 consiga representar, e nunca
++ * acima de amf.time.t3512.max. TS 23.501 5.3.2: o AMF atribui o valor a cada
++ * UE segundo políticas locais.
++ *
++ * Um registo inicial volta ao valor global; os outros tipos mantêm o valor.
++ * Com o modo desligado, o valor é sempre o global, como no Open5GS original.
++ */
++static void gmm_update_t3512(amf_ue_t *amf_ue)
++{
++    /*
++     * Passos da codificação GPRS Timer 3, em segundos
++     * (ogs_nas_gprs_timer_3_from_sec): cada unidade vai até 31 passos.
++     */
++    static const ogs_time_t step[] = { 2, 30, 60, 600, 3600, 36000, 1152000 };
++    ogs_time_t old_value, new_value;
++    int i;
++
++    ogs_assert(amf_ue);
++
++    if (!amf_self()->time.t3512.dynamic ||
++        amf_ue->nas.registration.value ==
++            OGS_NAS_5GS_REGISTRATION_TYPE_INITIAL) {
++        amf_ue->t3512_value = amf_self()->time.t3512.value;
++        return;
++    }
++
++    if (amf_ue->nas.registration.value !=
++            OGS_NAS_5GS_REGISTRATION_TYPE_PERIODIC_UPDATING)
++        return;
++
++    old_value = amf_ue->t3512_value;
++    new_value = 2 * old_value;
++
++    for (i = 0; i < OGS_ARRAY_SIZE(step); i++) {
++        if (new_value <= 31 * step[i]) {
++            new_value = ((new_value + step[i] - 1) / step[i]) * step[i];
++            break;
++        }
++    }
++
++    /* O máximo foi validado como representável (amf_context_validation) */
++    amf_ue->t3512_value = ogs_min(new_value, amf_self()->time.t3512.max);
++
++    ogs_info("[%s] Dynamic T3512 [%lld -> %lld sec]", amf_ue->supi,
++            (long long)old_value, (long long)amf_ue->t3512_value);
++}
+diff --git a/src/amf/gmm-sm.c b/src/amf/gmm-sm.c
+index fbedd4518..2b4ff16e7 100644
+--- a/src/amf/gmm-sm.c
++++ b/src/amf/gmm-sm.c
+@@ -216,7 +216,7 @@ void gmm_state_de_registered(ogs_fsm_t *s, amf_event_t *e)
+             CLEAR_AMF_UE_TIMER(amf_ue->t3513);
+ 
+             ogs_timer_start(amf_ue->implicit_deregistration.timer,
+-                    ogs_time_from_sec(amf_self()->time.t3512.value + 240));
++                    ogs_time_from_sec(amf_ue->t3512_value + 240));
+             break;
+ 
+         case AMF_TIMER_IMPLICIT_DEREGISTRATION:
+@@ -1037,7 +1037,7 @@ void gmm_state_registered(ogs_fsm_t *s, amf_event_t *e)
+             CLEAR_AMF_UE_TIMER(amf_ue->t3513);
+ 
+             ogs_timer_start(amf_ue->implicit_deregistration.timer,
+-                    ogs_time_from_sec(amf_self()->time.t3512.value + 240));
++                    ogs_time_from_sec(amf_ue->t3512_value + 240));
+             break;
+ 
+         case AMF_TIMER_IMPLICIT_DEREGISTRATION:
+diff --git a/src/amf/ngap-handler.c b/src/amf/ngap-handler.c
+index add12d526..6f29573f4 100644
+--- a/src/amf/ngap-handler.c
++++ b/src/amf/ngap-handler.c
+@@ -2014,7 +2014,7 @@ void ngap_handle_ue_context_release_action(ran_ue_t *ran_ue)
+         if (amf_ue) {
+             amf_ue_deassociate_ran_ue(amf_ue, ran_ue);
+             ogs_timer_start(amf_ue->mobile_reachable.timer,
+-                    ogs_time_from_sec(amf_self()->time.t3512.value + 240));
++                    ogs_time_from_sec(amf_ue->t3512_value + 240));
+         } else
+             ogs_error("No UE(amf-ue) Context");
+ 
+@@ -5340,7 +5340,7 @@ void ngap_handle_error_indication(amf_gnb_t *gnb, ogs_ngap_message_t *message)
+                 ran_ue_remove(ran_ue);
+                 ogs_timer_start(amf_ue->mobile_reachable.timer,
+                         ogs_time_from_sec(
+-                            amf_self()->time.t3512.value + 240));
++                            amf_ue->t3512_value + 240));
+             }
+         } else {
+             ran_ue_remove(ran_ue);
+diff --git a/src/amf/nsmf-handler.c b/src/amf/nsmf-handler.c
+index e5cfa399a..3e9cebf8e 100644
+--- a/src/amf/nsmf-handler.c
++++ b/src/amf/nsmf-handler.c
+@@ -824,7 +824,7 @@ int amf_nsmf_pdusession_handle_update_sm_context(
+          */
+                     ogs_timer_start(amf_ue->mobile_reachable.timer,
+                             ogs_time_from_sec(
+-                                amf_self()->time.t3512.value + 240));
++                                amf_ue->t3512_value + 240));
+                 }
+ 
+             } else if (state == AMF_REMOVE_N2_CONTEXT_BY_ERROR_INDICATION) {
+@@ -841,7 +841,7 @@ int amf_nsmf_pdusession_handle_update_sm_context(
+ 
+                     ogs_timer_start(amf_ue->mobile_reachable.timer,
+                             ogs_time_from_sec(
+-                                amf_self()->time.t3512.value + 240));
++                                amf_ue->t3512_value + 240));
+                 }
+                 
+             } else if (state == AMF_REMOVE_S1_CONTEXT_BY_RESET_ALL) {
+@@ -896,7 +896,7 @@ int amf_nsmf_pdusession_handle_update_sm_context(
+          */
+                     ogs_timer_start(amf_ue->mobile_reachable.timer,
+                             ogs_time_from_sec(
+-                                amf_self()->time.t3512.value + 240));
++                                amf_ue->t3512_value + 240));
+                 }
+ 
+             } else if (state == AMF_REMOVE_S1_CONTEXT_BY_RESET_PARTIAL) {
+@@ -967,7 +967,7 @@ int amf_nsmf_pdusession_handle_update_sm_context(
+          */
+                     ogs_timer_start(amf_ue->mobile_reachable.timer,
+                             ogs_time_from_sec(
+-                                amf_self()->time.t3512.value + 240));
++                                amf_ue->t3512_value + 240));
+                 }
+             } else {
+                 ogs_error("Invalid STATE[%d]", state);
+diff --git a/src/amf/sbi-path.c b/src/amf/sbi-path.c
+index 68178f38f..23d289507 100644
+--- a/src/amf/sbi-path.c
++++ b/src/amf/sbi-path.c
+@@ -665,7 +665,7 @@ static void amf_sbi_release_ran_ue_on_gnb_remove(
+      */
+     if (OGS_FSM_CHECK(&amf_ue->sm, gmm_state_registered)) {
+         ogs_timer_start(amf_ue->mobile_reachable.timer,
+-                ogs_time_from_sec(amf_self()->time.t3512.value + 240));
++                ogs_time_from_sec(amf_ue->t3512_value + 240));
+     } else {
+         amf_ue_remove(amf_ue);
+     }
