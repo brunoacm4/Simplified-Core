@@ -65,14 +65,33 @@ def main(pcap):
          # população mista (POPULACAO): fica a especificação, "30:10 900:10"
          'periodo_s': meta.get('populacao') or int(meta['periodo'])}
 
-    # --- NGAP: mensagens e procedimentos ---
+    # --- NGAP: mensagens, procedimentos e latência do core ---
+    # Latência do core, emparelhada pelo RAN-UE-NGAP-ID (um por ligação): acordar = do InitialUEMessage
+    # com Service Request ao InitialContextSetupRequest; adormecer = do UEContextReleaseRequest ao
+    # UEContextReleaseCommand. É só o tempo do lado do core visto no N2.
     ngap_msgs = 0
     procs = Counter()
-    for t, info, codes in tshark(pasta, ficheiro, 'ngap && sctp',
-                                 ['frame.time_epoch', '_ws.col.Info', 'ngap.procedureCode']):
+    inicio_sr, inicio_rel, lat = {}, {}, {'acordar': [], 'adormecer': []}
+    for t, info, codes, pdus, rids in tshark(pasta, ficheiro, 'ngap && sctp',
+                                             ['frame.time_epoch', '_ws.col.Info', 'ngap.procedureCode',
+                                              'ngap.NGAP_PDU', 'ngap.RAN_UE_NGAP_ID']):
         t = float(t)
         if not (t0 <= t <= t1):
             continue
+        cl, pl, rl = codes.split('#'), pdus.split('#'), rids.split('#')
+        if codes and len(cl) == len(pl) == len(rl):
+            for c, pdu, rid in zip(cl, pl, rl):
+                c, pdu = int(c), int(pdu)
+                # Numa trama com várias mensagens não se sabe qual NAS vai em cada uma; aceita-se o
+                # InitialUEMessage desde que a trama não tenha registos (na janela da fábrica não há)
+                if c == 15 and PROCEDIMENTOS['registo_periodico'] not in info:
+                    inicio_sr[rid] = t
+                elif c == 14 and pdu == 0 and rid in inicio_sr:
+                    lat['acordar'].append(t - inicio_sr.pop(rid))
+                elif c == 42:
+                    inicio_rel[rid] = t
+                elif c == 41 and pdu == 0 and rid in inicio_rel:
+                    lat['adormecer'].append(t - inicio_rel.pop(rid))
         ngap_msgs += len(codes.split('#')) if codes else 1
         # A coluna Info repete o nome da mensagem NAS (exterior e interior), por isso contar
         # ocorrências do texto duplicaria: conta-se a mensagem NGAP que INICIA o procedimento.
@@ -116,6 +135,15 @@ def main(pcap):
             nome = 'MongoDB' if '10.100.1.100' in (s, d) else (
                 interface(s) if interface(s) != 'outra' else interface(d))
             bytes_if[nome] += int(n)
+
+    def resumo(v):
+        if not v:
+            return None
+        v = sorted(v)
+        return {'n': len(v), 'mediana_ms': round(1000 * v[len(v) // 2], 2),
+                'p95_ms': round(1000 * v[min(len(v) - 1, int(0.95 * len(v)))], 2),
+                'max_ms': round(1000 * v[-1], 2)}
+    M['latencia_core'] = {k: resumo(v) for k, v in lat.items()}
 
     M['procedimentos'] = {k: procs.get(k, 0) for k in PROCEDIMENTOS}
     M['procedimentos']['total'] = sum(M['procedimentos'].values())
@@ -194,6 +222,10 @@ def main(pcap):
             print(f"  em repouso: {r['cpu_ms_repouso']} ms em {r['repouso_s']}s, {r['mem_mib_repouso']} MiB"
                   f" | CPU atribuível aos procedimentos: {r['cpu_ms_liquida']} ms"
                   f" ({M.get('cpu_ms_por_procedimento')} ms por procedimento)")
+    for k, v in M['latencia_core'].items():
+        if v:
+            print(f"latência do core, {k}: mediana {v['mediana_ms']} ms | p95 {v['p95_ms']} ms | "
+                  f"máx {v['max_ms']} ms ({v['n']})")
     print(f"bytes na janela: {dict(bytes_if)}")
 
 

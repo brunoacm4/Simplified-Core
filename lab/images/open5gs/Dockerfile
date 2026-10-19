@@ -17,7 +17,12 @@ RUN apt-get update && \
 COPY . /src/open5gs
 WORKDIR /src/open5gs
 
-RUN meson setup build --prefix=/opt/open5gs --libdir=lib && \
+# Opções extra do meson. O docker-compose.yml passa
+#   MESON_ARGS="--buildtype=debugoptimized -Dc_args=-fno-omit-frame-pointer"
+# (-O2, como em produção; baseline do lab desde 2026-10-15). Vazio = build por omissão do meson
+# ("debug": -O0 -g), o de todas as medições até essa data (imagem v2.8.0, variante o0).
+ARG MESON_ARGS=""
+RUN meson setup build --prefix=/opt/open5gs --libdir=lib $MESON_ARGS && \
     ninja -C build install
 
 # ---------- Fase 2: runtime ----------

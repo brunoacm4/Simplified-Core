@@ -1,0 +1,23 @@
+# Variante O0: as funções do Open5GS compiladas sem otimização (build por omissão do meson, -O0 -g),
+# como em todas as medições do lab até 2026-10-15. Serve só para reproduzir essas medições; desde
+# então a baseline é -O2 (docker-compose.yml). Mesmo código, só muda a compilação. Só imagem:
+# combina-se com qualquer outra variante.
+#
+# Imagem: docker build -t core-simplified/open5gs:v2.8.0 -f images/open5gs/Dockerfile ../open5gs
+#         (sem MESON_ARGS)
+
+x-o0: &o0
+  image: core-simplified/open5gs:v2.8.0
+
+services:
+  nrf: *o0
+  scp: *o0
+  amf: *o0
+  smf: *o0
+  upf: *o0
+  ausf: *o0
+  udm: *o0
+  udr: *o0
+  pcf: *o0
+  nssf: *o0
+  bsf: *o0

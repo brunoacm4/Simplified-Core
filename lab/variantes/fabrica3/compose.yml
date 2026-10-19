@@ -1,0 +1,42 @@
+# Fábrica de três dispositivos, um contentor cada, para a história completa
+# (scripts/historia-fabrica.sh). Um contentor por dispositivo deixa mexer em cada um sozinho: tirar a
+# cobertura só ao sensor lento (tc netem) e desligar só o atuador.
+#
+#   sensor-rapido  imsi …001  envia de 30 em 30 s
+#   atuador        imsi …002  recebe um comando da rede de 50 em 50 s e responde
+#   sensor-lento   imsi …003  envia de 3 em 3 min (bateria), faz registos periódicos entre envios
+#
+# Mesma configuração do 'ue' da baseline, só muda o IMSI (nr-ue -i). O atuador não tem 'restart':
+# depois de desligado (deregister switch-off) tem de ficar desligado.
+#
+# Uso: COMPOSE_FILE=docker-compose.yml:variantes/t3512-60s/compose.yml:variantes/idle/compose.yml:variantes/fabrica3/compose.yml
+#      (o serviço 'ue' da baseline não é arrancado)
+
+x-dispositivo: &dispositivo
+  image: core-simplified/ueransim:v3.3.0
+  volumes: [ ./config/ueransim/ue.yaml:/etc/ueransim/ue.yaml:ro ]
+  depends_on: [ gnb ]
+  cap_add: [ NET_ADMIN ]
+  devices: [ /dev/net/tun:/dev/net/tun ]
+  sysctls:
+    net.ipv6.conf.all.disable_ipv6: 1
+    net.ipv6.conf.default.disable_ipv6: 1
+
+services:
+  sensor-rapido:
+    <<: *dispositivo
+    command: nr-ue -c /etc/ueransim/ue.yaml -i imsi-999700000000001
+    restart: unless-stopped
+    networks:
+      ran: { ipv4_address: 10.100.5.71 }
+  atuador:
+    <<: *dispositivo
+    command: nr-ue -c /etc/ueransim/ue.yaml -i imsi-999700000000002
+    networks:
+      ran: { ipv4_address: 10.100.5.72 }
+  sensor-lento:
+    <<: *dispositivo
+    command: nr-ue -c /etc/ueransim/ue.yaml -i imsi-999700000000003
+    restart: unless-stopped
+    networks:
+      ran: { ipv4_address: 10.100.5.73 }

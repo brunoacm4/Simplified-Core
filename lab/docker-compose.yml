@@ -11,11 +11,16 @@
 
 name: lab
 
+# Open5GS compilado como em produção (-O2). Até 2026-10-15 o lab usou o build por omissão do meson
+# (-O0, imagem core-simplified/open5gs:v2.8.0); para reproduzir essas medições: variante o0.
+# O -fno-omit-frame-pointer deixa o perf reconstruir as pilhas (scripts/perfil-ciclo.sh).
 x-open5gs: &open5gs
-  image: core-simplified/open5gs:v2.8.0
+  image: core-simplified/open5gs:v2.8.0-o2
   build:
     context: ../open5gs
     dockerfile: ../lab/images/open5gs/Dockerfile
+    args:
+      MESON_ARGS: "--buildtype=debugoptimized -Dc_args=-fno-omit-frame-pointer"
   restart: unless-stopped
 
 x-ueransim: &ueransim

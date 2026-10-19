@@ -116,7 +116,29 @@ compose adicional (`docker compose -f docker-compose.yml -f variantes/<nome>/com
 VARIANTE=t3512-dinamico N_UES=20 POPULACAO="30:10 900:10" APRENDIZAGEM=1800 DURACAO=3600 \
   VITIMAS="30:2 900:2" ./scripts/cenario-fabrica.sh <pasta> corrida1
 ./scripts/analisar-t3512.py <pasta>/corrida1.meta          # por classe e vítimas -> corrida1.t3512.json
+
+# procedimentos isolados, 1 dispositivo: acordar pela rede (paging) e perda de rede com regresso
+# antes/depois do desregisto implícito (tc netem no UE); mensagens por acontecimento
+[N=5] [CORRIDAS="paging regresso"] ./scripts/medir-grupo1.sh <pasta>
+./scripts/analisar-grupo1.py <pasta>/paging.pcapng
+[N=3] ./scripts/medir-grupo2.sh <pasta>                      # segunda sessão PDU e libertação
+./scripts/analisar-grupo1.py <pasta>/sessoes.pcapng
+
+# história completa de uma fábrica de 3 dispositivos (variante fabrica3, tempo acelerado, ~21 min)
+./scripts/historia-fabrica.sh <pasta>
+./scripts/analisar-historia.py <pasta>/historia.pcapng       # -> historia.historia.json
+
+# perfil de CPU do ciclo acordar/adormecer (perf com DWARF num contentor auxiliar, images/perf/)
+docker build --build-arg BASE=core-simplified/open5gs:v2.8.0-o2 -t core-simplified/perf:o2 images/perf   # e :o0 com BASE=...:v2.8.0
+[IMAGEM=o2] [VARIANTE=sem-scp|baseline] ./scripts/perfil-ciclo.sh <pasta> <nome>
+./scripts/analisar-perfil.py <pasta>/<nome>.meta              # µs de CPU por ciclo, por categoria
 ```
+
+**Build -O2 (desde 2026-10-15).** Até essa data a imagem do Open5GS foi compilada com o buildtype por
+omissão do meson ("debug", -O0, imagem `core-simplified/open5gs:v2.8.0`). As contagens de mensagens não
+dependem disso; o CPU sim (−19% por ciclo com -O2). A baseline passou a ser
+`core-simplified/open5gs:v2.8.0-o2` (`docker compose build` já passa os `MESON_ARGS`). Para reproduzir
+as medições antigas: variante `o0` (só troca a imagem; combina com qualquer outra).
 
 **Dois cenários:**
 
