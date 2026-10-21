@@ -1,0 +1,41 @@
+Não formatar hexdumps que não vão ser mostrados
+
+ogs_log_hexdump_func() formatava o dump inteiro (um snprintf por byte, até
+OGS_HUGE_LEN) e só depois ogs_log_print() via que o nível não era para
+mostrar. Há 49 chamadas ogs_log_hexdump(OGS_LOG_DEBUG, ...) no código; as
+que pesam são a do servidor SBI, em cada escrita HTTP/2
+(lib/sbi/nghttp2-server.c), e as dos descodificadores NAS. A função passa a
+sair logo se o nível do domínio que vai imprimir (OGS_LOG_DOMAIN deste
+ficheiro, o mesmo que ogs_log_print() usa) não mostra o dump. O que aparece
+nos registos não muda.
+
+Medido no lab (Open5GS -O2, sem SCP):
+
+  CPU de log por ciclo acordar/adormecer (perf, 100 UEs)     252 -> 86 us
+  CPU do ciclo no AMF + SMF + UPF (perf, 100 UEs)          2523 -> 2217 us
+  CPU por UE no registo + sessão, 20 / 100 UEs    9,9 / 9,8 -> 8,3 / 8,7 ms
+  idem com SCP                                  17,2 / 17,2 -> 13,2 / 14,2 ms
+
+Commit bc56afb8f no ramo panic/v2.8.0 do fork.
+
+diff --git a/lib/core/ogs-log.c b/lib/core/ogs-log.c
+index ac43d6d7d..197374178 100644
+--- a/lib/core/ogs-log.c
++++ b/lib/core/ogs-log.c
+@@ -499,6 +499,16 @@ void ogs_log_hexdump_func(ogs_log_level_e level, int id,
+     char dumpstr[OGS_HUGE_LEN];
+     char *p, *last;
+ 
++    /*
++     * PANIC: do not format a dump that will not be printed. The dump is
++     * printed by ogs_log_print() below, i.e. with OGS_LOG_DOMAIN of this file,
++     * so the same domain decides here. Most callers ask for OGS_LOG_DEBUG on
++     * every message (e.g. each HTTP/2 write of the SBI server), and formatting
++     * took ~7% of the CPU of each UE wake-up/sleep cycle.
++     */
++    if (ogs_log_get_domain_level(OGS_LOG_DOMAIN) < level)
++        return;
++
+     last = dumpstr + OGS_HUGE_LEN;
+     p = dumpstr;
+ 

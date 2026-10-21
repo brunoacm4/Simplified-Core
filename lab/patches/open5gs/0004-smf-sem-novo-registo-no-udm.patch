@@ -1,0 +1,84 @@
+SMF: sem novo registo no UDM nas ativações provocadas pela rede
+
+Quando a rede acorda um UE (dados para um UE adormecido: N1N2 Message
+Transfer, paging, Service Request), o SMF reativa o túnel no UPF e, no fim,
+fazia outra vez Nudm_UECM_Registration (SMF -> UDM -> UDR) antes de
+responder ao AMF. É o caminho do fim do estabelecimento da sessão
+(src/smf/n4-handler.c, ramo OGS_PFCP_MODIFY_ACTIVATE), reutilizado em cada
+ativação que não veio de um pedido ACTIVATING do AMF. A TS 23.502 §4.2.3.3
+(Service Request pela rede) não tem Nudm_UECM; o registo pertence ao
+estabelecimento da sessão (§4.3.2.2.1). Cada passagem somava ainda uma
+"sessão criada com sucesso" às métricas (SMF_METR_CTR_SM_PDUSESSIONCREATIONSUCC).
+
+A sessão passa a guardar se o UDM já confirmou o registo do SMF
+(udm_registered). Nesse caso a ativação responde logo ao AMF, com o mesmo
+204, e marca o plano de utilizador como ativo (up_cnx_state = ACTIVATED),
+que depois de um paging ficava DEACTIVATED. O estabelecimento da sessão
+não muda.
+
+Medido no lab (1 UE, 5 comandos pela rede): ciclo acordar pela rede +
+adormecer, 9 NGAP / 5 SBI / 6 PFCP -> 9 / 3 / 6. Todos os comandos
+entregues; o adormecer seguinte continua a desativar o túnel (2 PFCP).
+
+Commit f842a1282 no ramo panic/v2.8.0 do fork.
+
+diff --git a/src/smf/context.h b/src/smf/context.h
+index 54736a6b0..35e2462be 100644
+--- a/src/smf/context.h
++++ b/src/smf/context.h
+@@ -446,6 +446,13 @@ typedef struct smf_sess_s {
+ 
+     OpenAPI_up_cnx_state_e up_cnx_state;
+ 
++    /*
++     * PANIC: the UDM confirmed Nudm_UECM_Registration for this session.
++     * The N4 activation path registers the SMF only once (at the end of PDU
++     * Session Establishment), not on every network-triggered activation.
++     */
++    bool udm_registered;
++
+     /* Serving PLMN ID & Home PLMN ID */
+     ogs_plmn_id_t serving_plmn_id;
+     ogs_plmn_id_t home_plmn_id;
+diff --git a/src/smf/n4-handler.c b/src/smf/n4-handler.c
+index e0817362a..96563947f 100644
+--- a/src/smf/n4-handler.c
++++ b/src/smf/n4-handler.c
+@@ -814,6 +814,22 @@ void smf_5gc_n4_handle_session_modification_response(
+                 sess->up_cnx_state = OpenAPI_up_cnx_state_ACTIVATED;
+                 smf_sbi_send_sm_context_updated_data_up_cnx_state(
+                         sess, stream, OpenAPI_up_cnx_state_ACTIVATED);
++            } else if (sess->udm_registered) {
++                /*
++                 * PANIC: network-triggered activation (N1N2 transfer, paging,
++                 * Service Request) of a session whose SMF is already
++                 * registered in the UDM. Nudm_UECM_Registration belongs to PDU
++                 * Session Establishment (TS 23.502 §4.3.2.2.1), not to the
++                 * Service Request (§4.2.3.3): answer the AMF directly, as the
++                 * registration path below does, and record that the user
++                 * plane is active again.
++                 */
++                sess->up_cnx_state = OpenAPI_up_cnx_state_ACTIVATED;
++                if (stream)
++                    ogs_assert(true ==
++                            ogs_sbi_send_http_status_no_content(stream));
++                else
++                    ogs_error("Stream has already been removed");
+             } else {
+                 r = smf_sbi_discover_and_send(
+                         OpenAPI_service_name_nudm_uecm, NULL,
+diff --git a/src/smf/smf-sm.c b/src/smf/smf-sm.c
+index e10af0ec2..6b035de16 100644
+--- a/src/smf/smf-sm.c
++++ b/src/smf/smf-sm.c
+@@ -1085,6 +1085,10 @@ void smf_state_operational(ogs_fsm_t *s, smf_event_t *e)
+                 break;
+             }
+ 
++            if (state == SMF_UECM_STATE_REGISTERED ||
++                state == SMF_UECM_STATE_REGISTERED_HR)
++                sess->udm_registered = true;
++
+             if (state == SMF_UECM_STATE_REGISTERED) {
+                 if (stream)
+                     ogs_assert(true ==

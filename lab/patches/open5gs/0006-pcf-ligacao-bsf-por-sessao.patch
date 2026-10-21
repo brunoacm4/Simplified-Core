@@ -1,0 +1,41 @@
+PCF: cada sessão apaga a sua ligação no BSF
+
+O PCF regista no BSF uma ligação por sessão PDU (Nbsf_Management_Register,
+guardada em sess->binding), mas ao terminar a política de uma sessão só a
+apagava se não houvesse outra sessão do mesmo UE para a mesma S-NSSAI e DNN
+(commit 758cf9dd7 do Open5GS, 2021). O BSF do Open5GS guarda as ligações
+pelo endereço do UE (src/bsf/bsf-sm.c), e cada sessão tem o seu: a ligação
+da sessão libertada ficava no BSF. A verificação sai; cada sessão apaga a
+sua.
+
+Medido no lab (1 UE, segunda sessão pedida e libertada 3 vezes): antes,
+4 POST pcfBindings e 0 DELETE; depois, 4 POST e 3 DELETE (fica só a da
+sessão que continua ativa). Libertação pedida pelo UE, 4 NGAP / 8 SBI /
+2 PFCP -> 4 / 9 / 2.
+
+Commit 1674b6bed no ramo panic/v2.8.0 do fork.
+
+diff --git a/src/pcf/npcf-handler.c b/src/pcf/npcf-handler.c
+index abde3a0d1..7892c65ec 100644
+--- a/src/pcf/npcf-handler.c
++++ b/src/pcf/npcf-handler.c
+@@ -626,11 +626,14 @@ bool pcf_npcf_smpolicycontrol_handle_delete(pcf_sess_t *sess,
+         pcf_sbi_send_policyauthorization_terminate_notify(app_session);
+     }
+ 
+-    if (pcf_sessions_number_by_snssai_and_dnn(
+-                pcf_ue_sm, &sess->s_nssai, sess->dnn) > 1) {
+-        ogs_expect(true ==
+-                ogs_sbi_send_response(stream, OGS_SBI_HTTP_STATUS_NO_CONTENT));
+-    } else if (sess->binding.resource_uri) {
++    /*
++     * PANIC: each PDU session registers its own binding (keyed by its UE
++     * address in the BSF), so each session removes its own. The former check
++     * "more than one session with this S-NSSAI and DNN -> keep the binding"
++     * (commit 758cf9dd7, 2021) left the bindings of the other sessions in the
++     * BSF after their release.
++     */
++    if (sess->binding.resource_uri) {
+         r = pcf_sess_sbi_discover_and_send(
+                 OpenAPI_service_name_nbsf_management, NULL,
+                 pcf_nbsf_management_build_de_register, sess, stream, NULL);
