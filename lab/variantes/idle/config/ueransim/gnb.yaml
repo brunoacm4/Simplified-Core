@@ -34,3 +34,4 @@ cellAccessType: nr
 # Para exercitar o ciclo de inatividade, usar a variante 'idle' (variantes/idle/).
 inactivityTimer: 10    # segundos sem dados até o gNB pedir a libertação do contexto
 minConnectionTime: 5   # segundos após a criação do contexto antes de a libertação ser possível
+amfReconnect: 2        # segundos entre tentativas de voltar a ligar ao AMF depois de o perder (patch 0005)

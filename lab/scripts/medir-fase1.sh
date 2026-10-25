@@ -22,6 +22,8 @@
 #           depois de o core os dar como inalcançáveis (R2): os pools não podem acumular contextos.
 #   ciclos  N UEs, 3 ciclos de desregisto implícito e regresso com sessão nova (amostras C0..C3
 #           registados, D1..D3 desregistados): o heap que fica depois de cada ciclo estabiliza?
+#   reinicio-core  N UEs adormecidos; reiniciam todas as funções do core (o MongoDB fica); dois envios
+#           de cada UE (fase 1b, contexto persistente). Precisa do patch 0005 do UERANSIM.
 #
 # Cada amostra, por função do core: memory.current/peak e memory.stat (anon, file, kernel, slab,
 # sock) do cgroup, CPU, e pelo gdb (contentor auxiliar core-simplified/perf:o2, --pid container:):
@@ -361,6 +363,38 @@ if echo "$CORRIDAS" | grep -qw ciclos; then
         echo "$t0 $(agora) regresso-$c" >> "$OUT/$NOME.eventos"
         amostra "$OUT/$NOME.memoria.tsv" C$c
     done
+    terminar "$NOME" "$N"
+fi
+
+# --- reinicio-core: o nó do core inteiro reinicia com N dispositivos adormecidos (fase 1b) ---
+# O MongoDB não reinicia. O gNB volta a ligar sozinho (patch 0005 do UERANSIM, amfReconnect na
+# variante idle). Dois envios de cada dispositivo, com o mesmo estímulo em todos os braços: hoje o 1.º
+# leva um Service Reject e um registo inicial e o 2.º a sessão nova (o UERANSIM só a pede com dados).
+if echo "$CORRIDAS" | grep -qw reinicio-core; then
+    NOME=reinicio-core-n$N$SUF
+    arrancar "$NOME" "$N"
+    amostra "$OUT/$NOME.memoria.tsv" S1
+    desde=$(linhas_ue)
+    setups=$(conta gnb "NG Setup procedure is successful")
+    t0=$(agora)
+    docker compose restart $CORE >/dev/null 2>&1
+    espera_conta gnb "NG Setup procedure is successful" $((setups + 1)) 120
+    echo "$t0 $(agora) reinicio" >> "$OUT/$NOME.eventos"
+    sleep 10
+    # Contentores novos: o cpu.stat recomeça, por isso o CPU conta-se a partir de S2
+    amostra "$OUT/$NOME.memoria.tsv" S2
+    t0=$(agora)
+    uplink_todos "$N"
+    # Hoje voltam com um registo inicial; com o contexto persistente, com um Service Accept
+    espera_ues 'Registration is successful\|Service Accept received' "$desde" "$N" 300
+    sleep 20
+    echo "$t0 $(agora) envio-1" >> "$OUT/$NOME.eventos"
+    amostra "$OUT/$NOME.memoria.tsv" S3
+    t0=$(agora)
+    uplink_todos "$N"
+    sleep 30
+    echo "$t0 $(agora) envio-2" >> "$OUT/$NOME.eventos"
+    amostra "$OUT/$NOME.memoria.tsv" S4
     terminar "$NOME" "$N"
 fi
 echo "fase 1 -> $OUT ($CORRIDAS, N=$N)"
