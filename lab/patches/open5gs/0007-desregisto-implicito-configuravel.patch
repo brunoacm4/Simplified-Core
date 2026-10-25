@@ -1,0 +1,202 @@
+AMF: desregisto implícito configurável (amf.time.implicit_deregistration)
+
+O Open5GS desregista um UE 2 × (T3512 + 4 min) depois do último contacto:
+primeiro o mobile reachable timer (T3512 + 240 s), depois o implicit
+de-registration timer com o mesmo valor (26 min com o T3512 por omissão).
+A TS 24.501 §5.3.7 deixa o segundo "network dependent". Numa fábrica a
+população é conhecida, e um dispositivo que fique horas sem cobertura
+volta com o custo de um registo inicial (identificação, autenticação e
+sessão nova).
+
+Nova chave amf.time.implicit_deregistration.value: segundos contados a
+partir de "inalcançável"; "never" ou 0 = não desregistar. Sem a chave, o
+comportamento é o do Open5GS (T3512 + 240 s). Guardar um dispositivo
+custa ~33 KiB de heap e um lugar em cada pool, sem memória residente a
+mais (medido com 100 e 200 UEs).
+
+Medido no lab (T3512 = 60 s, 15 min sem cobertura, NGAP / SBI / PFCP com
+os adormeceres): regresso + primeiro envio de 1 UE, 23 / 27 / 6 (registo
+inicial + sessão nova) -> 14 / 4 / 4. Com 100 UEs depois de uma
+manutenção do gNB: o mesmo por UE, latência do core no regresso 84 ->
+3,2 ms (mediana), CPU do primeiro envio 786 -> 203 ms. Sozinho deixa a
+sessão "muda" depois do regresso (os comandos da rede ficam no UPF):
+usar com os patches 0008 e 0009.
+
+Commit 3881e3546 no ramo panic/v2.8.0 do fork.
+
+diff --git a/configs/open5gs/amf.yaml.in b/configs/open5gs/amf.yaml.in
+index 3919c5c2c..fb41653f9 100644
+--- a/configs/open5gs/amf.yaml.in
++++ b/configs/open5gs/amf.yaml.in
+@@ -55,6 +55,9 @@ amf:
+ #      value: 720   # 12 minutes * 60 = 720 seconds
+     t3512:
+       value: 540    # 9 minutes * 60 = 540 seconds
++#    implicit_deregistration:  # PANIC: time after the UE becomes unreachable
++#      value: 86400            # (mobile reachable timer); "never" or 0 = keep it
++#                              # registered; absent = T3512 + 240 s (Open5GS)
+ 
+ ################################################################################
+ # SBI Server
+diff --git a/lib/app/ogs-config.c b/lib/app/ogs-config.c
+index 57da49ca9..5d626078f 100644
+--- a/lib/app/ogs-config.c
++++ b/lib/app/ogs-config.c
+@@ -649,6 +649,9 @@ int ogs_app_parse_local_conf(const char *local)
+                             /* handle config in amf */
+                         } else if (!strcmp(time_key, "t3512")) {
+                             /* handle config in amf */
++                        } else if (!strcmp(time_key,
++                                    "implicit_deregistration")) {
++                            /* handle config in amf (PANIC) */
+                         } else if (!strcmp(time_key, "t3402")) {
+                             /* handle config in mme */
+                         } else if (!strcmp(time_key, "t3412")) {
+diff --git a/src/amf/context.c b/src/amf/context.c
+index 830f7aff0..5bbb69d07 100644
+--- a/src/amf/context.c
++++ b/src/amf/context.c
+@@ -130,6 +130,10 @@ static int amf_context_prepare(void)
+     self.time.t3512.dynamic = false;
+     self.time.t3512.max = 3600;
+ 
++    /* PANIC: desregisto implícito como no Open5GS (T3512 + 4 min) */
++    self.time.implicit_deregistration.configured = false;
++    self.time.implicit_deregistration.value = 0;
++
+     return OGS_OK;
+ }
+ 
+@@ -216,6 +220,12 @@ static int amf_context_validation(void)
+             return OGS_ERROR;
+         }
+     }
++    if (self.time.implicit_deregistration.configured &&
++        self.time.implicit_deregistration.value < 0) {
++        ogs_error("amf.time.implicit_deregistration.value [%lld] below 0",
++                (long long)self.time.implicit_deregistration.value);
++        return OGS_ERROR;
++    }
+ 
+     return OGS_OK;
+ }
+@@ -1079,6 +1089,30 @@ int amf_context_parse_config(void)
+                                 } else
+                                     ogs_warn("unknown key `%s`", t3512_key);
+                             }
++                        } else if (!strcmp(time_key,
++                                    "implicit_deregistration")) {
++                            /* PANIC: desregisto implícito configurável */
++                            ogs_yaml_iter_t idt_iter;
++                            ogs_yaml_iter_recurse(&time_iter, &idt_iter);
++
++                            while (ogs_yaml_iter_next(&idt_iter)) {
++                                const char *idt_key =
++                                    ogs_yaml_iter_key(&idt_iter);
++                                ogs_assert(idt_key);
++
++                                if (!strcmp(idt_key, "value")) {
++                                    const char *v =
++                                        ogs_yaml_iter_value(&idt_iter);
++                                    if (v) {
++                                        self.time.implicit_deregistration.
++                                            configured = true;
++                                        self.time.implicit_deregistration.
++                                            value = strcmp(v, "never") ?
++                                                atoll(v) : 0;
++                                    }
++                                } else
++                                    ogs_warn("unknown key `%s`", idt_key);
++                            }
+                         } else if (!strcmp(time_key, "t3412")) {
+                             /* handle config in mme */
+                         } else if (!strcmp(time_key, "nf_instance")) {
+@@ -1732,6 +1766,20 @@ amf_ue_t *amf_ue_add(ran_ue_t *ran_ue)
+     return amf_ue;
+ }
+ 
++/*
++ * PANIC: duração do desregisto implícito de um UE, contada a partir do momento
++ * em que fica inalcançável. 0 = não desregistar (o temporizador não arranca).
++ */
++ogs_time_t amf_ue_implicit_deregistration_duration(amf_ue_t *amf_ue)
++{
++    ogs_assert(amf_ue);
++
++    if (!self.time.implicit_deregistration.configured)
++        return ogs_time_from_sec(amf_ue->t3512_value + 240);
++
++    return ogs_time_from_sec(self.time.implicit_deregistration.value);
++}
++
+ void amf_ue_remove(amf_ue_t *amf_ue)
+ {
+     int i;
+diff --git a/src/amf/context.h b/src/amf/context.h
+index 425f2827a..f01a942c9 100644
+--- a/src/amf/context.h
++++ b/src/amf/context.h
+@@ -141,6 +141,19 @@ typedef struct amf_context_s {
+             bool dynamic;           /* ajustar o valor de cada UE */
+             ogs_time_t max;         /* limite do valor ajustado (segundos) */
+         } t3512;
++
++        /*
++         * PANIC: desregisto implícito configurável (fase 1). Tempo entre o UE
++         * ficar inalcançável (expira o mobile reachable timer) e o desregisto
++         * implícito, que apaga o contexto e as sessões. TS 24.501 5.3.7: o
++         * valor "is network dependent". Sem configuração: T3512 + 4 min, como
++         * no Open5GS. Com 0 ("never"): o UE fica registado e inalcançável até
++         * voltar (ou até um registo inicial o substituir).
++         */
++        struct {
++            bool configured;
++            ogs_time_t value;       /* Segundos; 0 = desligado */
++        } implicit_deregistration;
+     } time;
+ 
+ } amf_context_t;
+@@ -1031,6 +1044,7 @@ void amf_ue_new_guti(amf_ue_t *amf_ue);
+ void amf_ue_confirm_guti(amf_ue_t *amf_ue);
+ 
+ amf_ue_t *amf_ue_add(ran_ue_t *ran_ue);
++ogs_time_t amf_ue_implicit_deregistration_duration(amf_ue_t *amf_ue);
+ void amf_ue_remove(amf_ue_t *amf_ue);
+ void amf_ue_remove_all(void);
+ 
+diff --git a/src/amf/gmm-sm.c b/src/amf/gmm-sm.c
+index 2b4ff16e7..30ce8ffa4 100644
+--- a/src/amf/gmm-sm.c
++++ b/src/amf/gmm-sm.c
+@@ -215,8 +215,13 @@ void gmm_state_de_registered(ogs_fsm_t *s, amf_event_t *e)
+             AMF_UE_CLEAR_5GSM_MESSAGE(amf_ue);
+             CLEAR_AMF_UE_TIMER(amf_ue->t3513);
+ 
+-            ogs_timer_start(amf_ue->implicit_deregistration.timer,
+-                    ogs_time_from_sec(amf_ue->t3512_value + 240));
++            /* PANIC: desregisto implícito configurável (0 = desligado) */
++            if (amf_ue_implicit_deregistration_duration(amf_ue))
++                ogs_timer_start(amf_ue->implicit_deregistration.timer,
++                        amf_ue_implicit_deregistration_duration(amf_ue));
++            else
++                ogs_info("[%s] Unreachable, kept registered "
++                        "(implicit de-registration disabled)", amf_ue->supi);
+             break;
+ 
+         case AMF_TIMER_IMPLICIT_DEREGISTRATION:
+@@ -1036,8 +1041,13 @@ void gmm_state_registered(ogs_fsm_t *s, amf_event_t *e)
+             AMF_UE_CLEAR_5GSM_MESSAGE(amf_ue);
+             CLEAR_AMF_UE_TIMER(amf_ue->t3513);
+ 
+-            ogs_timer_start(amf_ue->implicit_deregistration.timer,
+-                    ogs_time_from_sec(amf_ue->t3512_value + 240));
++            /* PANIC: desregisto implícito configurável (0 = desligado) */
++            if (amf_ue_implicit_deregistration_duration(amf_ue))
++                ogs_timer_start(amf_ue->implicit_deregistration.timer,
++                        amf_ue_implicit_deregistration_duration(amf_ue));
++            else
++                ogs_info("[%s] Unreachable, kept registered "
++                        "(implicit de-registration disabled)", amf_ue->supi);
+             break;
+ 
+         case AMF_TIMER_IMPLICIT_DEREGISTRATION:

@@ -1,0 +1,212 @@
+AMF: responder "UE not reachable" em vez de paging (amf.reachability.reject_when_unreachable)
+
+Depois de o mobile reachable timer expirar, o Open5GS continuava a fazer
+paging a cada N1N2MessageTransfer do SMF (3 Paging em ~6 s), quando a
+TS 23.502 §4.2.3.3 manda responder que o UE não está alcançável. O AMF
+passa a ter um Paging Proceed Flag por UE (TS 23.501 §5.4.1.1): falso
+quando o mobile reachable timer expira, verdadeiro em qualquer contacto
+NAS. Com amf.reachability.reject_when_unreachable, um N1N2MessageTransfer
+para um UE em CM-IDLE com o PPF falso (ativação ou modificação da sessão)
+recebe 504 com ProblemDetails, cause UE_NOT_REACHABLE, sem paging.
+
+O corpo é problem+json, não o N1N2MessageTransferError da TS 29.518: o
+SBI é interno e a lib/sbi do Open5GS não constrói esse modelo. A SCP
+passa-o sem o mudar. Desligado por omissão.
+
+Medido no lab (1 UE inalcançável, 6 pacotes da rede): o 1.º pacote passa
+de 3 / 2 / 2 (3 Paging) a 0 / 1 / 2; os seguintes continuam guardados no
+UPF sem aviso, por isso é preciso o patch 0009.
+
+Commit 636a54bc3 no ramo panic/v2.8.0 do fork.
+
+diff --git a/configs/open5gs/amf.yaml.in b/configs/open5gs/amf.yaml.in
+index fb41653f9..ff3f5bce1 100644
+--- a/configs/open5gs/amf.yaml.in
++++ b/configs/open5gs/amf.yaml.in
+@@ -58,6 +58,9 @@ amf:
+ #    implicit_deregistration:  # PANIC: time after the UE becomes unreachable
+ #      value: 86400            # (mobile reachable timer); "never" or 0 = keep it
+ #                              # registered; absent = T3512 + 240 s (Open5GS)
++#  reachability:                 # PANIC: N1N2MessageTransfer for an unreachable
++#    reject_when_unreachable: true  # UE (PPF cleared): answer 504 UE_NOT_REACHABLE
++#                                   # instead of paging; default false (Open5GS)
+ 
+ ################################################################################
+ # SBI Server
+diff --git a/src/amf/amf-sm.c b/src/amf/amf-sm.c
+index 1236df30e..18d30b7f5 100644
+--- a/src/amf/amf-sm.c
++++ b/src/amf/amf-sm.c
+@@ -1055,6 +1055,7 @@ void amf_state_operational(ogs_fsm_t *s, amf_event_t *e)
+              */
+             CLEAR_AMF_UE_TIMER(amf_ue->mobile_reachable);
+             CLEAR_AMF_UE_TIMER(amf_ue->implicit_deregistration);
++            amf_ue->ppf = true; /* PANIC: o UE voltou a contactar a rede */
+         }
+ 
+         ogs_assert(amf_ue);
+diff --git a/src/amf/context.c b/src/amf/context.c
+index 5bbb69d07..c58053911 100644
+--- a/src/amf/context.c
++++ b/src/amf/context.c
+@@ -134,6 +134,9 @@ static int amf_context_prepare(void)
+     self.time.implicit_deregistration.configured = false;
+     self.time.implicit_deregistration.value = 0;
+ 
++    /* PANIC: UE inalcançável continua a ser chamado (como no Open5GS) */
++    self.reachability.reject_when_unreachable = false;
++
+     return OGS_OK;
+ }
+ 
+@@ -1126,6 +1129,22 @@ int amf_context_parse_config(void)
+                         } else
+                             ogs_warn("unknown key `%s`", time_key);
+                     }
++                } else if (!strcmp(amf_key, "reachability")) {
++                    /* PANIC: resposta a N1N2 para UEs inalcançáveis */
++                    ogs_yaml_iter_t reach_iter;
++                    ogs_yaml_iter_recurse(&amf_iter, &reach_iter);
++
++                    while (ogs_yaml_iter_next(&reach_iter)) {
++                        const char *reach_key =
++                            ogs_yaml_iter_key(&reach_iter);
++                        ogs_assert(reach_key);
++
++                        if (!strcmp(reach_key, "reject_when_unreachable"))
++                            self.reachability.reject_when_unreachable =
++                                ogs_yaml_iter_bool(&reach_iter);
++                        else
++                            ogs_warn("unknown key `%s`", reach_key);
++                    }
+                 } else if (!strcmp(amf_key, "default")) {
+                     /* handle config in sbi library */
+                 } else if (!strcmp(amf_key, "sbi")) {
+@@ -1732,6 +1751,7 @@ amf_ue_t *amf_ue_add(ran_ue_t *ran_ue)
+ 
+     /* PANIC: cada UE começa com o T3512 global */
+     amf_ue->t3512_value = self.time.t3512.value;
++    amf_ue->ppf = true;     /* PANIC: alcançável por paging até prova em contrário */
+ 
+     /* SBI Type */
+     amf_ue->sbi.type = OGS_SBI_OBJ_UE_TYPE;
+diff --git a/src/amf/context.h b/src/amf/context.h
+index f01a942c9..e1afd5d15 100644
+--- a/src/amf/context.h
++++ b/src/amf/context.h
+@@ -156,6 +156,15 @@ typedef struct amf_context_s {
+         } implicit_deregistration;
+     } time;
+ 
++    /*
++     * PANIC: com reject_when_unreachable, um N1N2MessageTransfer para um UE
++     * inalcançável (PPF falso) é respondido "UE not reachable" sem paging
++     * (TS 23.502 4.2.3.3), em vez de o chamar outra vez.
++     */
++    struct {
++        bool reject_when_unreachable;
++    } reachability;
++
+ } amf_context_t;
+ 
+ typedef struct amf_gnb_s {
+@@ -677,6 +686,13 @@ struct amf_ue_s {
+      */
+     ogs_time_t t3512_value;
+ 
++    /*
++     * PANIC: Paging Proceed Flag (TS 23.501 5.4.1.1). Fica falso quando expira
++     * o mobile reachable timer (o UE deixou de ser alcançável por paging) e
++     * volta a verdadeiro no contacto seguinte do UE.
++     */
++    bool ppf;
++
+     /* UE Radio Capability */
+     OCTET_STRING_t  ueRadioCapability;
+ 
+diff --git a/src/amf/gmm-sm.c b/src/amf/gmm-sm.c
+index 30ce8ffa4..6231ad8de 100644
+--- a/src/amf/gmm-sm.c
++++ b/src/amf/gmm-sm.c
+@@ -197,6 +197,7 @@ void gmm_state_de_registered(ogs_fsm_t *s, amf_event_t *e)
+              */
+ 
+             ogs_warn("[%s] Mobile Reachable Timer Expired", amf_ue->supi);
++            amf_ue->ppf = false;    /* PANIC: TS 23.501 5.4.1.1, limpar o PPF */
+ 
+             ogs_list_for_each(&amf_ue->sess_list, sess) {
+                 if (sess->paging.ongoing == true &&
+@@ -1023,6 +1024,7 @@ void gmm_state_registered(ogs_fsm_t *s, amf_event_t *e)
+              */
+ 
+             ogs_warn("[%s] Mobile Reachable Timer Expired", amf_ue->supi);
++            amf_ue->ppf = false;    /* PANIC: TS 23.501 5.4.1.1, limpar o PPF */
+ 
+             ogs_list_for_each(&amf_ue->sess_list, sess) {
+                 if (sess->paging.ongoing == true &&
+diff --git a/src/amf/namf-handler.c b/src/amf/namf-handler.c
+index 337d6e45e..0a47f2c75 100644
+--- a/src/amf/namf-handler.c
++++ b/src/amf/namf-handler.c
+@@ -232,6 +232,28 @@ int amf_namf_comm_handle_n1_n2_message_transfer(
+                 uint16_t fqdn_port = 0;
+                 ogs_sockaddr_t *addr = NULL, *addr6 = NULL;
+ 
++                /*
++                 * PANIC: UE inalcançável (PPF limpo): TS 23.502 4.2.3.3, "the
++                 * AMF shall send an N1N2MessageTransfer response ... to
++                 * indicate that the UE is not reachable", sem paging. 504 com
++                 * ProblemDetails (cause UE_NOT_REACHABLE): o SMF trata qualquer
++                 * estado que não seja 200/202 sem abortar.
++                 */
++                if (amf_self()->reachability.reject_when_unreachable &&
++                    amf_ue->ppf == false) {
++                    ogs_warn("[%s:%d] UE not reachable: N1N2 rejected",
++                            amf_ue->supi, sess->psi);
++                    if (n1buf)
++                        ogs_pkbuf_free(n1buf);
++                    if (n2buf)
++                        ogs_pkbuf_free(n2buf);
++                    ogs_assert(true == ogs_sbi_server_send_error(stream,
++                                OGS_SBI_HTTP_STATUS_GATEWAY_TIMEOUT, recvmsg,
++                                "UE not reachable", amf_ue->supi,
++                                OGS_SBI_APP_STRERROR_UE_NOT_REACHABLE));
++                    return OGS_OK;
++                }
++
+                 if (!N1N2MessageTransferReqData->n1n2_failure_txf_notif_uri) {
+                     ogs_error("[%s:%d] No n1-n2-failure-notification-uri",
+                             amf_ue->supi, sess->psi);
+@@ -335,6 +357,20 @@ int amf_namf_comm_handle_n1_n2_message_transfer(
+             ogs_sbi_server_t *server = NULL;
+             ogs_sbi_header_t header;
+ 
++            /* PANIC: UE inalcançável, como no ramo do Service Request */
++            if (amf_self()->reachability.reject_when_unreachable &&
++                amf_ue->ppf == false) {
++                ogs_warn("[%s:%d] UE not reachable: N1N2 rejected",
++                        amf_ue->supi, sess->psi);
++                ogs_pkbuf_free(n1buf);
++                ogs_pkbuf_free(n2buf);
++                ogs_assert(true == ogs_sbi_server_send_error(stream,
++                            OGS_SBI_HTTP_STATUS_GATEWAY_TIMEOUT, recvmsg,
++                            "UE not reachable", amf_ue->supi,
++                            OGS_SBI_APP_STRERROR_UE_NOT_REACHABLE));
++                return OGS_OK;
++            }
++
+             status = OGS_SBI_HTTP_STATUS_ACCEPTED;
+             N1N2MessageTransferRspData.cause =
+                 OpenAPI_n1_n2_message_transfer_cause_ATTEMPTING_TO_REACH_UE;
+diff --git a/src/amf/ngap-handler.c b/src/amf/ngap-handler.c
+index 6f29573f4..f83f86d04 100644
+--- a/src/amf/ngap-handler.c
++++ b/src/amf/ngap-handler.c
+@@ -867,6 +867,7 @@ void ngap_handle_initial_ue_message(amf_gnb_t *gnb, ogs_ngap_message_t *message)
+          */
+         CLEAR_AMF_UE_TIMER(amf_ue->mobile_reachable);
+         CLEAR_AMF_UE_TIMER(amf_ue->implicit_deregistration);
++        amf_ue->ppf = true;     /* PANIC: o UE voltou a contactar a rede */
+     }
+ 
+     ogs_ngap_ASN_to_nr_cgi(

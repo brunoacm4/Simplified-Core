@@ -54,6 +54,9 @@ medidos no cabeçalho.
 | `0004-smf-sem-novo-registo-no-udm.patch` | Numa ativação provocada pela rede (paging), o SMF já registado no UDM responde ao AMF e marca o plano de utilizador ativo, sem novo `Nudm_UECM_Registration` | Reutilizava o caminho do fim do estabelecimento da sessão: 2 SBI a mais por comando a um dispositivo adormecido e uma "sessão criada" a mais nas métricas. TS 23.502 §4.2.3.3 não tem Nudm_UECM. Medido: ciclo pela rede 9/5/6 → 9/3/6 (NGAP/SBI/PFCP) |
 | `0005-smf-sessao-ja-inativa.patch` | O SMF responde sem PFCP a um pedido para desativar uma sessão já inativa | O AMF pede a desativação de todas as sessões em cada adormecer, mesmo as que nada ativou (por exemplo depois de um registo periódico). Medido: esse adormecer 3/1/2 → 3/1/0. **Precisa da 0004** |
 | `0006-pcf-ligacao-bsf-por-sessao.patch` | Cada sessão apaga a sua ligação no BSF ao terminar a política | Uma verificação de 2021 mantinha a ligação quando havia outra sessão para a mesma DNN e slice; o BSF guarda-as pelo endereço do UE, por isso as das sessões libertadas ficavam lá. Medido: 4 criações e 0 remoções → 4 e 3 |
+| `0007-desregisto-implicito-configuravel.patch` | Prazo do desregisto implícito configurável (`amf.time.implicit_deregistration`: segundos depois de inalcançável, ou `never`) | Fase 1: numa população conhecida, um dispositivo horas sem cobertura não deve voltar com registo inicial e sessão nova. Guardá-lo custa ~33 KiB de heap e um lugar por pool. Medido: regresso + 1.º envio 23/27/6 → 14/4/4; com 100 UEs, latência do core 84 → 3,2 ms. **Desligado por omissão; usar com a 0008 e a 0009** |
+| `0008-amf-ue-not-reachable-sem-paging.patch` | PPF por UE; com `amf.reachability.reject_when_unreachable`, um N1N2MessageTransfer para um UE inalcançável recebe 504 UE_NOT_REACHABLE em vez de paging | O Open5GS fazia paging a UEs já dados como inalcançáveis (TS 23.502 §4.2.3.3). Medido: 1.º pacote 3/2/2 (3 Paging) → 0/1/2. **Desligado por omissão** |
+| `0009-smf-upf-deitar-fora-buffer.patch` | Com `smf.dl_buffering.drop_when_unreachable`, o SMF manda o UPF deitar fora os pacotes guardados (PFCP DROBU) quando o UE está inalcançável ou o paging falha | O UPF só avisa do primeiro pacote guardado: sem isto, depois do regresso os comandos da rede ficavam no UPF ("sessão muda") e o UE recebia os velhos de uma vez. Medido: comando depois do regresso perdido → entregue; 7 pacotes velhos → 0; cada pacote para um UE inalcançável custa 0/1/4. **Desligado por omissão** |
 
 ### UERANSIM (`patches/ueransim/`)
 
@@ -98,6 +101,7 @@ compose adicional (`docker compose -f docker-compose.yml -f variantes/<nome>/com
 | `t3512-60s` | T3512 de 1 min, para gerar registos periódicos densos e medir o custo de cada um | Não (só configuração) |
 | `smf-sem-diameter` | SMF sem a ligação Diameter (freeDiameter) do EPC | Não (só configuração) |
 | `t3512-dinamico` | Cada dispositivo começa com T3512 de 9 min; a cada registo periódico o AMF duplica-lhe o valor, até 1 hora (`amf.time.t3512.dynamic`/`max`) | Sim (patch do T3512 dinâmico no Open5GS) |
+| `fase1` | T3512 de 1 min (como a `t3512-60s`) e as opções dos patches 0007–0009 em braços cumulativos escolhidos com `BRACO=` (`ref`, `0007`, `0008`, `0009`) | Sim (patches 0007–0009 no Open5GS) |
 | `vitimas` | Não é uma variante do core: contentor extra de UEs (IMSIs a partir de …021) que o cenário "fábrica" desliga de repente para medir o tempo de deteção. Ligado com `VITIMAS=` | Não |
 
 ## Medições
@@ -136,6 +140,13 @@ VARIANTE=t3512-dinamico N_UES=20 POPULACAO="30:10 900:10" APRENDIZAGEM=1800 DURA
 docker build --build-arg BASE=core-simplified/open5gs:v2.8.0-o2 -t core-simplified/perf:o2 images/perf   # e :o0 com BASE=...:v2.8.0
 [IMAGEM=o2] [VARIANTE=sem-scp|baseline] ./scripts/perfil-ciclo.sh <pasta> <nome>
 ./scripts/analisar-perfil.py <pasta>/<nome>.meta              # µs de CPU por ciclo, por categoria
+
+# fase 1 (dispositivos ausentes): memória por dentro das funções (gdb no contentor perf: heap talloc,
+# mallinfo2, pools), perda de cobertura com tc netem; corridas frota, dl, ausencia, manutencao,
+# reinicio, ciclos (descritas no cabeçalho do script)
+[N=100] [CORRIDAS="frota dl"] [AMF_VARIANTE=fase1 BRACO=0009] ./scripts/medir-fase1.sh <pasta> [sufixo]
+./scripts/analisar-fase1.py <pasta>/<nome>.meta              # tabelas por amostra, CPU, latência, logs
+./scripts/analisar-grupo1.py <pasta>/<nome>.pcapng           # mensagens por acontecimento
 ```
 
 **Build -O2 (desde 2026-10-15).** Até essa data a imagem do Open5GS foi compilada com o buildtype por

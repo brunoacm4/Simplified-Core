@@ -1,0 +1,359 @@
+SMF/UPF: deitar fora o buffer de um UE inalcançável (PFCP DROBU, smf.dl_buffering.drop_when_unreachable)
+
+O UPF só avisa o SMF do primeiro pacote guardado para um UE em CM-IDLE.
+Quando o paging falhava, ou com o 504 do patch 0008, o SMF não fazia nada
+(TODO no código): os pacotes seguintes ficavam guardados sem aviso e,
+depois do regresso, os comandos da rede continuavam no UPF até o UE mandar
+dados, que então os recebia todos de uma vez. Com o desregisto aos 26 min
+isto ficava escondido; com o patch 0007 durava horas.
+
+Com smf.dl_buffering.drop_when_unreachable, ao receber o 504
+UE_NOT_REACHABLE ou o aviso de paging falhado (UE_NOT_RESPONDING,
+UE_NOT_REACHABLE_FOR_SESSION), o SMF manda uma Session Modification só
+com o bit DROBU do PFCPSMReq-Flags (TS 29.244). O UPF liberta os pacotes
+guardados em todos os FARs da sessão e mantém BUFF|NOCP, por isso o
+pacote seguinte volta a ser avisado. Desligado por omissão.
+
+Medido no lab (com 0007 e 0008, 1 UE 15 min sem cobertura): cada pacote
+para o UE inalcançável custa 0 / 1 / 4 e é deitado fora; depois do
+regresso, um comando da rede provoca paging e é entregue (6 / 2 / 4), e
+o UE já não recebe pacotes velhos (antes, 7).
+
+Commit d92d0942b no ramo panic/v2.8.0 do fork.
+
+diff --git a/configs/open5gs/smf.yaml.in b/configs/open5gs/smf.yaml.in
+index e47752393..2317557ab 100644
+--- a/configs/open5gs/smf.yaml.in
++++ b/configs/open5gs/smf.yaml.in
+@@ -50,6 +50,9 @@ smf:
+ #    - ::1
+ #  ctf:
+ #    enabled: auto   # auto(default)|yes|no
++#  dl_buffering:                 # PANIC: UE not reachable or paging failed: tell
++#    drop_when_unreachable: true # the UPF to drop the buffered DL packets (PFCP
++#                                # DROBU); default false (Open5GS)
+   freeDiameter: @sysconfdir@/freeDiameter/smf.conf
+ 
+ ################################################################################
+diff --git a/lib/pfcp/context.c b/lib/pfcp/context.c
+index 8042689c3..6dcb9f399 100644
+--- a/lib/pfcp/context.c
++++ b/lib/pfcp/context.c
+@@ -1925,6 +1925,25 @@ void ogs_pfcp_far_remove_all(ogs_pfcp_sess_t *sess)
+         ogs_pfcp_far_remove(far);
+ }
+ 
++/*
++ * PANIC: DROBU (TS 29.244 7.5.4, PFCPSMReq-Flags). Drop the downlink packets
++ * buffered in a FAR, keeping its Apply Action: with an empty buffer, the next
++ * packet is reported again (Downlink Data Report). Returns how many were dropped.
++ */
++int ogs_pfcp_far_drop_buffered(ogs_pfcp_far_t *far)
++{
++    int i, n;
++
++    ogs_assert(far);
++
++    n = far->num_of_buffered_gtpu;
++    for (i = 0; i < n; i++)
++        ogs_pkbuf_free(far->buffered_gtpu[i]);
++    far->num_of_buffered_gtpu = 0;
++
++    return n;
++}
++
+ ogs_pfcp_urr_t *ogs_pfcp_urr_add(ogs_pfcp_sess_t *sess)
+ {
+     ogs_pfcp_urr_t *urr = NULL;
+diff --git a/lib/pfcp/context.h b/lib/pfcp/context.h
+index c29b73bed..4eed68ae0 100644
+--- a/lib/pfcp/context.h
++++ b/lib/pfcp/context.h
+@@ -471,6 +471,7 @@ ogs_pfcp_far_t *ogs_pfcp_far_find_by_teid(uint32_t teid);
+ 
+ void ogs_pfcp_far_remove(ogs_pfcp_far_t *far);
+ void ogs_pfcp_far_remove_all(ogs_pfcp_sess_t *sess);
++int ogs_pfcp_far_drop_buffered(ogs_pfcp_far_t *far);
+ 
+ ogs_pfcp_urr_t *ogs_pfcp_urr_add(ogs_pfcp_sess_t *sess);
+ ogs_pfcp_urr_t *ogs_pfcp_urr_find(
+diff --git a/lib/pfcp/xact.h b/lib/pfcp/xact.h
+index bbdb879d2..bcb2a3489 100644
+--- a/lib/pfcp/xact.h
++++ b/lib/pfcp/xact.h
+@@ -118,6 +118,8 @@ typedef struct ogs_pfcp_xact_s {
+ #define OGS_PFCP_MODIFY_URR_TIME_QUOTA ((uint64_t)1<<32)
+ #define OGS_PFCP_MODIFY_URR_VOLUME_THRESH ((uint64_t)1<<33)
+ #define OGS_PFCP_MODIFY_URR_TIME_THRESH ((uint64_t)1<<34)
++/* PANIC: Session Modification with only PFCPSMReq-Flags DROBU */
++#define OGS_PFCP_MODIFY_DROP_BUFFERED ((uint64_t)1<<35)
+     uint64_t        modify_flags;
+ 
+ #define OGS_PFCP_DELETE_TRIGGER_LOCAL_INITIATED 1
+diff --git a/src/smf/context.c b/src/smf/context.c
+index 96516af69..f26fef794 100644
+--- a/src/smf/context.c
++++ b/src/smf/context.c
+@@ -165,6 +165,8 @@ static int smf_context_prepare(void)
+     self.diam_config->cnf_port = DIAMETER_PORT;
+     self.diam_config->cnf_port_tls = DIAMETER_SECURE_PORT;
+ 
++    self.dl_buffering.drop_when_unreachable = false;
++
+     return OGS_OK;
+ }
+ 
+@@ -986,6 +988,21 @@ int smf_context_parse_config(void)
+                                             &security_indication_iter);
+                         }
+                     }
++                } else if (!strcmp(smf_key, "dl_buffering")) {
++                    /* PANIC: smf.dl_buffering.drop_when_unreachable */
++                    ogs_yaml_iter_t dl_buffering_iter;
++                    ogs_yaml_iter_recurse(&smf_iter, &dl_buffering_iter);
++                    while (ogs_yaml_iter_next(&dl_buffering_iter)) {
++                        const char *dl_buffering_key =
++                            ogs_yaml_iter_key(&dl_buffering_iter);
++                        ogs_assert(dl_buffering_key);
++                        if (!strcmp(dl_buffering_key,
++                                    "drop_when_unreachable")) {
++                            self.dl_buffering.drop_when_unreachable =
++                                ogs_yaml_iter_bool(&dl_buffering_iter);
++                        } else
++                            ogs_warn("unknown key `%s`", dl_buffering_key);
++                    }
+                 } else if (!strcmp(smf_key, "pfcp")) {
+                     /* handle config in pfcp library */
+                 } else if (!strcmp(smf_key, "upf")) {
+diff --git a/src/smf/context.h b/src/smf/context.h
+index 35e2462be..beda70b72 100644
+--- a/src/smf/context.h
++++ b/src/smf/context.h
+@@ -155,6 +155,15 @@ typedef struct smf_context_s {
+         const char *maximum_integrity_protected_data_rate_downlink;
+     } security_indication;
+ 
++    /*
++     * PANIC: when the AMF says the UE is not reachable (or paging failed),
++     * tell the UPF to drop the buffered downlink packets (PFCP DROBU), so the
++     * next packet is reported again instead of the session staying silent.
++     */
++    struct {
++        bool drop_when_unreachable;
++    } dl_buffering;
++
+ #define SMF_UE_IS_LAST_SESSION(__sMF) \
+      ((__sMF) && (ogs_list_count(&(__sMF)->sess_list)) == 1)
+     ogs_list_t      smf_ue_list;
+diff --git a/src/smf/n4-build.c b/src/smf/n4-build.c
+index 53dc865ce..f05495fe7 100644
+--- a/src/smf/n4-build.c
++++ b/src/smf/n4-build.c
+@@ -351,6 +351,42 @@ ogs_pkbuf_t *smf_n4_build_pdr_to_modify_list(
+     return pkbuf;
+ }
+ 
++/* PANIC: Session Modification with only PFCPSMReq-Flags DROBU */
++ogs_pkbuf_t *smf_n4_build_drop_buffered_request(
++        uint8_t type, smf_sess_t *sess, ogs_pfcp_xact_t *xact)
++{
++    ogs_pfcp_message_t *pfcp_message = NULL;
++    ogs_pfcp_session_modification_request_t *req = NULL;
++    ogs_pfcp_smreq_flags_t smreq_flags;
++    ogs_pkbuf_t *pkbuf = NULL;
++
++    ogs_debug("Session Modification Request [DROBU]");
++    ogs_assert(sess);
++    ogs_assert(xact);
++    ogs_assert(xact->modify_flags & OGS_PFCP_MODIFY_DROP_BUFFERED);
++
++    pfcp_message = ogs_calloc(1, sizeof(*pfcp_message));
++    if (!pfcp_message) {
++        ogs_error("ogs_calloc() failed");
++        return NULL;
++    }
++
++    req = &pfcp_message->pfcp_session_modification_request;
++
++    smreq_flags.value = 0;
++    smreq_flags.drop_buffered_packets = 1;
++    req->pfcpsmreq_flags.presence = 1;
++    req->pfcpsmreq_flags.u8 = smreq_flags.value;
++
++    pfcp_message->h.type = type;
++    pkbuf = ogs_pfcp_build_msg(pfcp_message);
++    ogs_expect(pkbuf);
++
++    ogs_free(pfcp_message);
++
++    return pkbuf;
++}
++
+ ogs_pkbuf_t *smf_n4_build_qos_flow_to_modify_list(
+         uint8_t type, smf_sess_t *sess, ogs_pfcp_xact_t *xact)
+ {
+diff --git a/src/smf/n4-build.h b/src/smf/n4-build.h
+index 49e9c89df..2b245d45a 100644
+--- a/src/smf/n4-build.h
++++ b/src/smf/n4-build.h
+@@ -30,6 +30,8 @@ ogs_pkbuf_t *smf_n4_build_session_establishment_request(
+         uint8_t type, smf_sess_t *sess, ogs_pfcp_xact_t *xact);
+ ogs_pkbuf_t *smf_n4_build_pdr_to_modify_list(
+         uint8_t type, smf_sess_t *sess, ogs_pfcp_xact_t *xact);
++ogs_pkbuf_t *smf_n4_build_drop_buffered_request(
++        uint8_t type, smf_sess_t *sess, ogs_pfcp_xact_t *xact);
+ ogs_pkbuf_t *smf_n4_build_qos_flow_to_modify_list(
+         uint8_t type, smf_sess_t *sess, ogs_pfcp_xact_t *xact);
+ ogs_pkbuf_t *smf_n4_build_session_deletion_request(
+diff --git a/src/smf/n4-handler.c b/src/smf/n4-handler.c
+index 96563947f..6b949b154 100644
+--- a/src/smf/n4-handler.c
++++ b/src/smf/n4-handler.c
+@@ -400,6 +400,12 @@ void smf_5gc_n4_handle_session_modification_response(
+ 
+     ogs_assert(sess);
+ 
++    /* PANIC: DROBU answer, nothing else changed in the session */
++    if (flags & OGS_PFCP_MODIFY_DROP_BUFFERED) {
++        ogs_debug("Session Modification Response [DROBU]");
++        return;
++    }
++
+     if (sess->local_ul_addr == NULL && sess->local_ul_addr6 == NULL) {
+         if (stream)
+             smf_sbi_send_sm_context_update_error_log(
+diff --git a/src/smf/namf-handler.c b/src/smf/namf-handler.c
+index 501218028..bf065ea45 100644
+--- a/src/smf/namf-handler.c
++++ b/src/smf/namf-handler.c
+@@ -19,6 +19,7 @@
+ 
+ #include "sbi-path.h"
+ #include "ngap-path.h"
++#include "pfcp-path.h"
+ #include "binding.h"
+ #include "namf-handler.h"
+ 
+@@ -56,6 +57,21 @@ bool smf_namf_comm_handle_n1_n2_message_transfer(
+ 
+     case SMF_NETWORK_TRIGGERED_SERVICE_REQUEST:
+     case SMF_NETWORK_REQUESTED_QOS_FLOW_MODIFICATION:
++        /*
++         * PANIC: TS 23.502 4.2.3.3 step 3c. The AMF answered "UE not
++         * reachable" (no paging): tell the UPF to drop the buffered packets.
++         */
++        if (smf_self()->dl_buffering.drop_when_unreachable &&
++            recvmsg->res_status >= 300 &&
++            recvmsg->ProblemDetails && recvmsg->ProblemDetails->cause &&
++            !strcmp(recvmsg->ProblemDetails->cause,
++                OGS_SBI_APP_STRERROR_UE_NOT_REACHABLE)) {
++            ogs_warn("[%s:%d] UE not reachable: drop buffered packets",
++                    smf_ue->supi, sess->psi);
++            ogs_expect(OGS_OK == smf_5gc_pfcp_send_drop_buffered_request(sess));
++            break;
++        }
++
+         N1N2MessageTransferRspData = recvmsg->N1N2MessageTransferRspData;
+         if (!N1N2MessageTransferRspData) {
+             ogs_error("No N1N2MessageTransferRspData [status:%d]",
+@@ -284,6 +300,17 @@ bool smf_namf_comm_handle_n1_n2_message_transfer_failure_notify(
+      * Procedure for pause of charging at SMF is specified in clause 4.4.4.
+      */
+ 
++    /* PANIC: paging failed, tell the UPF to drop the buffered packets */
++    if (smf_self()->dl_buffering.drop_when_unreachable &&
++        (N1N2MsgTxfrFailureNotification->cause ==
++            OpenAPI_n1_n2_message_transfer_cause_UE_NOT_RESPONDING ||
++         N1N2MsgTxfrFailureNotification->cause ==
++            OpenAPI_n1_n2_message_transfer_cause_UE_NOT_REACHABLE_FOR_SESSION)) {
++        ogs_warn("[%d] Paging failed [cause:%d]: drop buffered packets",
++                sess->psi, N1N2MsgTxfrFailureNotification->cause);
++        ogs_expect(OGS_OK == smf_5gc_pfcp_send_drop_buffered_request(sess));
++    }
++
+     ogs_assert(true == ogs_sbi_send_http_status_no_content(stream));
+     return true;
+ }
+diff --git a/src/smf/pfcp-path.c b/src/smf/pfcp-path.c
+index d768082a2..52a858660 100644
+--- a/src/smf/pfcp-path.c
++++ b/src/smf/pfcp-path.c
+@@ -649,6 +649,35 @@ int smf_5gc_pfcp_send_all_pdr_modification_request(
+     return rv;
+ }
+ 
++/*
++ * PANIC: the UE is not reachable, tell the UPF to drop the buffered downlink
++ * packets (DROBU). No SBI stream waits for the answer.
++ */
++int smf_5gc_pfcp_send_drop_buffered_request(smf_sess_t *sess)
++{
++    int rv;
++    ogs_pfcp_xact_t *xact = NULL;
++
++    ogs_assert(sess);
++
++    xact = ogs_pfcp_xact_local_create(
++            sess->pfcp_node, sess_5gc_timeout, OGS_UINT_TO_POINTER(sess->id));
++    if (!xact) {
++        ogs_error("ogs_pfcp_xact_local_create() failed");
++        return OGS_ERROR;
++    }
++
++    xact->local_seid = sess->smf_n4_seid;
++    xact->modify_flags =
++        OGS_PFCP_MODIFY_SESSION | OGS_PFCP_MODIFY_DROP_BUFFERED;
++
++    rv = smf_pfcp_send_modify_list(
++            sess, smf_n4_build_drop_buffered_request, xact, 0);
++    ogs_expect(rv == OGS_OK);
++
++    return rv;
++}
++
+ int smf_5gc_pfcp_send_qos_flow_list_modification_request(
+         smf_sess_t *sess, ogs_sbi_stream_t *stream,
+         uint64_t flags, ogs_time_t duration)
+diff --git a/src/smf/pfcp-path.h b/src/smf/pfcp-path.h
+index 9c1a0c346..761420f51 100644
+--- a/src/smf/pfcp-path.h
++++ b/src/smf/pfcp-path.h
+@@ -40,6 +40,7 @@ int smf_5gc_pfcp_send_session_establishment_request(
+ int smf_5gc_pfcp_send_all_pdr_modification_request(
+         smf_sess_t *sess, ogs_sbi_stream_t *stream,
+         uint64_t flags, int trigger, ogs_time_t duration);
++int smf_5gc_pfcp_send_drop_buffered_request(smf_sess_t *sess);
+ int smf_5gc_pfcp_send_qos_flow_list_modification_request(
+         smf_sess_t *sess, ogs_sbi_stream_t *stream,
+         uint64_t flags, ogs_time_t duration);
+diff --git a/src/upf/n4-handler.c b/src/upf/n4-handler.c
+index 3eb088474..e58e8b208 100644
+--- a/src/upf/n4-handler.c
++++ b/src/upf/n4-handler.c
+@@ -266,6 +266,26 @@ void upf_n4_handle_session_modification_request(
+         return;
+     }
+ 
++    /*
++     * PANIC: DROBU (TS 29.244 7.5.4): drop the buffered packets before
++     * applying the rest of the request. The SMF sends it when the UE is not
++     * reachable, so stale packets are not delivered later and the next
++     * packet is reported again.
++     */
++    if (req->pfcpsmreq_flags.presence == 1) {
++        ogs_pfcp_smreq_flags_t smreq_flags;
++
++        smreq_flags.value = req->pfcpsmreq_flags.u8;
++        if (smreq_flags.drop_buffered_packets) {
++            int dropped = 0;
++
++            ogs_list_for_each(&sess->pfcp.far_list, far)
++                dropped += ogs_pfcp_far_drop_buffered(far);
++            ogs_info("[DROBU] UP F-SEID[0x%lx] %d buffered packets dropped",
++                    (long)sess->upf_n4_seid, dropped);
++        }
++    }
++
+     for (i = 0; i < OGS_MAX_NUM_OF_PDR; i++) {
+         created_pdr[i] = ogs_pfcp_handle_create_pdr(&sess->pfcp,
+                 &req->create_pdr[i], NULL, &cause_value, &offending_ie_value);
