@@ -1,4 +1,5 @@
-# perf para o perfil de CPU das funções do Open5GS (scripts/perfil-ciclo.sh).
+# perf e gdb para observar as funções do Open5GS por dentro: perfil de CPU (scripts/perfil-ciclo.sh)
+# e heap/pools/tamanhos das estruturas (scripts/medir-fase1.sh, com --entrypoint gdb).
 #
 # Construída POR CIMA da imagem do Open5GS a perfilar, para o perf encontrar os binários e as
 # bibliotecas nos mesmos caminhos (/opt/open5gs, /usr/lib/x86_64-linux-gnu) e resolver os símbolos.
@@ -14,7 +15,7 @@ ARG BASE=core-simplified/open5gs:v2.8.0
 FROM ${BASE}
 
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends linux-tools-generic libc6-dbg && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends linux-tools-generic libc6-dbg gdb && \
     rm -rf /var/lib/apt/lists/* && \
     ln -sf "$(ls -d /usr/lib/linux-tools/*/perf | head -1)" /usr/local/bin/perf
 
