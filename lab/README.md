@@ -57,6 +57,10 @@ medidos no cabeçalho.
 | `0007-desregisto-implicito-configuravel.patch` | Prazo do desregisto implícito configurável (`amf.time.implicit_deregistration`: segundos depois de inalcançável, ou `never`) | Fase 1: numa população conhecida, um dispositivo horas sem cobertura não deve voltar com registo inicial e sessão nova. Guardá-lo custa ~33 KiB de heap e um lugar por pool. Medido: regresso + 1.º envio 23/27/6 → 14/4/4; com 100 UEs, latência do core 84 → 3,2 ms. **Desligado por omissão; usar com a 0008 e a 0009** |
 | `0008-amf-ue-not-reachable-sem-paging.patch` | PPF por UE; com `amf.reachability.reject_when_unreachable`, um N1N2MessageTransfer para um UE inalcançável recebe 504 UE_NOT_REACHABLE em vez de paging | O Open5GS fazia paging a UEs já dados como inalcançáveis (TS 23.502 §4.2.3.3). Medido: 1.º pacote 3/2/2 (3 Paging) → 0/1/2. **Desligado por omissão** |
 | `0009-smf-upf-deitar-fora-buffer.patch` | Com `smf.dl_buffering.drop_when_unreachable`, o SMF manda o UPF deitar fora os pacotes guardados (PFCP DROBU) quando o UE está inalcançável ou o paging falha | O UPF só avisa do primeiro pacote guardado: sem isto, depois do regresso os comandos da rede ficavam no UPF ("sessão muda") e o UE recebia os velhos de uma vez. Medido: comando depois do regresso perdido → entregue; 7 pacotes velhos → 0; cada pacote para um UE inalcançável custa 0/1/4. **Desligado por omissão** |
+| `0010-base-contexto-persistente.patch` | `ogs_pool_alloc_node` (reservar um elemento concreto de um pool); AMF e SMF ligados à libogsdbi; `amf.persistence.enabled` / `smf.persistence.enabled` com `db_uri` | Base da fase 1b: devolver depois de um reinício o M-TMSI, o índice da sessão e o IP que já existiam. **Desligado por omissão** |
+| `0011-amf-contexto-persistente.patch` | O AMF guarda no MongoDB a parte estável de cada UE registado (identidade, contexto de segurança, slices, sessões; ~700 bytes), reconstrói-a no arranque e apaga-a no desregisto | Fase 1b: um reinício do core não obriga a frota a registar-se de novo. Precisa da 0012 |
+| `0012-amf-kamf-novo-no-regresso.patch` | Na primeira mensagem de um UE restaurado, Security Mode Command com K_AMF novo (TS 33.501 A.13, K_AMF_change_flag); retoma o registo periódico ou o Service Request sem o registo no UDM | Os contadores NAS guardados podem estar atrasados: com a chave antiga repetiriam valores. Precisa do 0006 do UERANSIM |
+| `0013-smf-contexto-persistente.patch` | O SMF guarda cada sessão (índice, DNN, QoS, IPv4), reconstrói-a no arranque com o mesmo índice e IP e recria a sessão N4 quando a associação PFCP sobe; a montagem das regras sai do handler do PCF | Fase 1b. Medido (0010–0013, 100 UEs, reinício do core): 26,5/28,0/6 → 14/6/10 por dispositivo, 0 autenticações, mesmo IP, CPU do primeiro envio −73%; no cenário fábrica 0 escritas e o mesmo CPU e latência. **Desligado por omissão** |
 
 ### UERANSIM (`patches/ueransim/`)
 
@@ -66,6 +70,8 @@ medidos no cabeçalho.
 | `0002-ngksi-no-registo-de-mobilidade.patch` | `sendMobilityRegistration()` passa a preencher o ngKSI a partir do contexto de segurança atual | Sem isto o UE declara não ter chave (ngKSI = 7) em todos os registos de mobilidade e periódicos: o core faz uma autenticação 5G-AKA completa e destrói as sessões PDU. Medido: 9 NGAP e ~21 pedidos SBI, contra 5 NGAP e 0 SBI com o patch. Por corrigir no upstream |
 | `0003-temporizador-de-inatividade-no-gnb.patch` | Acrescenta ao gNB um temporizador de inatividade: liberta o contexto do UE ao fim de N segundos sem tráfego do utilizador (causa NGAP `user inactivity`) | Sem isto o UE nunca vai a CM-IDLE e os procedimentos do ciclo de inatividade não existem. **Desligado por omissão** (`inactivityTimer: 0`), para não alterar as medições já feitas; liga-se na variante `idle` |
 | `0004-limpar-dados-pendentes-ao-ligar.patch` | Limpa o estado "dados de subida pendentes" ao entrar em CM-CONNECTED | Sem isto um dispositivo que transmita um pacote de cada vez só acorda **uma vez**: o sinalizador fica preso a `true` e os pacotes seguintes já não pedem ligação. Sintoma: `ps-list` mostra `data-pending: true` com o UE em CM-IDLE. Por corrigir no upstream |
+| `0005-gnb-voltar-a-ligar-ao-amf.patch` | Com `amfReconnect: N` no gnb.yaml, o gNB volta a ligar ao AMF de N em N segundos depois de perder a associação SCTP (ou se a primeira ligação falhar) e refaz o NG Setup, sem desligar as células | Sem isto, depois de um reinício do core o gNB fica sem AMF até ser reiniciado, ao contrário de um gNB real. Necessário para medir o reinício do core (fase 1b). **Desligado por omissão**; `amfReconnect: 2` na variante `idle` |
+| `0006-smc-derivacao-horizontal.patch` | Security Mode Command com K_AMF_change_flag conforme a TS 33.501: K_AMF' com o contador da mensagem enviada, contentor do Service Request certo, lista de números de sequência limpa com a chave nova | Três desvios que impediam o K_AMF novo do patch 0012 do Open5GS. Por corrigir no upstream |
 
 ### Montar a partir de uma máquina limpa
 
@@ -101,7 +107,8 @@ compose adicional (`docker compose -f docker-compose.yml -f variantes/<nome>/com
 | `t3512-60s` | T3512 de 1 min, para gerar registos periódicos densos e medir o custo de cada um | Não (só configuração) |
 | `smf-sem-diameter` | SMF sem a ligação Diameter (freeDiameter) do EPC | Não (só configuração) |
 | `t3512-dinamico` | Cada dispositivo começa com T3512 de 9 min; a cada registo periódico o AMF duplica-lhe o valor, até 1 hora (`amf.time.t3512.dynamic`/`max`) | Sim (patch do T3512 dinâmico no Open5GS) |
-| `fase1` | T3512 de 1 min (como a `t3512-60s`) e as opções dos patches 0007–0009 em braços cumulativos escolhidos com `BRACO=` (`ref`, `0007`, `0008`, `0009`) | Sim (patches 0007–0009 no Open5GS) |
+| `fase1` | T3512 de 1 min (como a `t3512-60s`) e as opções dos patches 0007–0009 em braços cumulativos escolhidos com `BRACO=` (`ref`, `0007`, `0008`, `0009`, e `persist` = 0009 + contexto persistente) | Sim (patches 0007–0013 no Open5GS) |
+| `persistente` | A baseline com o contexto persistente ligado no AMF e no SMF (`db_uri`) | Sim (patches 0010–0013 no Open5GS) |
 | `vitimas` | Não é uma variante do core: contentor extra de UEs (IMSIs a partir de …021) que o cenário "fábrica" desliga de repente para medir o tempo de deteção. Ligado com `VITIMAS=` | Não |
 
 ## Medições
@@ -143,7 +150,7 @@ docker build --build-arg BASE=core-simplified/open5gs:v2.8.0-o2 -t core-simplifi
 
 # fase 1 (dispositivos ausentes): memória por dentro das funções (gdb no contentor perf: heap talloc,
 # mallinfo2, pools), perda de cobertura com tc netem; corridas frota, dl, ausencia, manutencao,
-# reinicio, ciclos (descritas no cabeçalho do script)
+# reinicio, ciclos e reinicio-core (reinício do core inteiro, fase 1b; descritas no cabeçalho)
 [N=100] [CORRIDAS="frota dl"] [AMF_VARIANTE=fase1 BRACO=0009] ./scripts/medir-fase1.sh <pasta> [sufixo]
 ./scripts/analisar-fase1.py <pasta>/<nome>.meta              # tabelas por amostra, CPU, latência, logs
 ./scripts/analisar-grupo1.py <pasta>/<nome>.pcapng           # mensagens por acontecimento

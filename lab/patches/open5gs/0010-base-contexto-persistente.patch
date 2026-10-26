@@ -1,0 +1,332 @@
+Base do contexto persistente: reservar elementos concretos de um pool e MongoDB no AMF e no SMF
+
+Fase 1b (notes/core/fase1b-contexto-persistente.md): depois de um reinício
+do core, o AMF e o SMF reconstroem os UEs e as sessões a partir de uma cópia
+mínima guardada no MongoDB. Para isso:
+
+- ogs_pool_alloc_node(): reserva um elemento livre concreto de um pool (troca-o
+  para a cabeça do anel de livres e usa ogs_pool_alloc), para devolver depois do
+  reinício o M-TMSI, o índice da sessão (sm_context_ref) e o IP do UE que já
+  existiam, sem os dar a outro;
+- o AMF e o SMF passam a ligar a libogsdbi (domínio de log "dbi");
+- amf.persistence.enabled e smf.persistence.enabled (desligadas por omissão):
+  ligam-se ao db_uri no arranque e recusam arrancar sem ele.
+
+Sem as opções, nada muda.
+
+Commit 8aadbb8f3 no ramo panic/v2.8.0 do fork.
+
+diff --git a/configs/open5gs/amf.yaml.in b/configs/open5gs/amf.yaml.in
+index ff3f5bce1..c13173630 100644
+--- a/configs/open5gs/amf.yaml.in
++++ b/configs/open5gs/amf.yaml.in
+@@ -61,6 +61,9 @@ amf:
+ #  reachability:                 # PANIC: N1N2MessageTransfer for an unreachable
+ #    reject_when_unreachable: true  # UE (PPF cleared): answer 504 UE_NOT_REACHABLE
+ #                                   # instead of paging; default false (Open5GS)
++#  persistence:                  # PANIC: keep the stable part of each registered UE
++#    enabled: true               # context in MongoDB (needs db_uri at the top
++#                                # level) and rebuild it at start-up; default false
+ 
+ ################################################################################
+ # SBI Server
+diff --git a/configs/open5gs/smf.yaml.in b/configs/open5gs/smf.yaml.in
+index 2317557ab..d2a37e927 100644
+--- a/configs/open5gs/smf.yaml.in
++++ b/configs/open5gs/smf.yaml.in
+@@ -53,6 +53,9 @@ smf:
+ #  dl_buffering:                 # PANIC: UE not reachable or paging failed: tell
+ #    drop_when_unreachable: true # the UPF to drop the buffered DL packets (PFCP
+ #                                # DROBU); default false (Open5GS)
++#  persistence:                  # PANIC: keep the stable part of each PDU session in
++#    enabled: true               # MongoDB (needs db_uri at the top level) and rebuild
++#                                # it at start-up; default false
+   freeDiameter: @sysconfdir@/freeDiameter/smf.conf
+ 
+ ################################################################################
+diff --git a/lib/core/ogs-pool.h b/lib/core/ogs-pool.h
+index daabb746c..3981cdd2e 100644
+--- a/lib/core/ogs-pool.h
++++ b/lib/core/ogs-pool.h
+@@ -140,6 +140,26 @@ typedef int32_t ogs_pool_id_t;
+     } \
+ } while (0)
+ 
++/*
++ * PANIC: allocate a specific free element ('target', a pointer into
++ * (pool)->array), e.g. to give back an identifier that must keep its value
++ * after a restart. The element is swapped to the head of the free ring and
++ * taken with ogs_pool_alloc(). *(node) is NULL if 'target' is not free.
++ */
++#define ogs_pool_alloc_node(pool, node, target) do { \
++    int __i, __k; \
++    *(node) = NULL; \
++    for (__i = 0; __i < (pool)->avail; __i++) { \
++        __k = ((pool)->head + __i) % ((pool)->size); \
++        if ((pool)->free[__k] == (target)) { \
++            (pool)->free[__k] = (pool)->free[(pool)->head]; \
++            (pool)->free[(pool)->head] = (target); \
++            ogs_pool_alloc(pool, node); \
++            break; \
++        } \
++    } \
++} while (0)
++
+ #define ogs_pool_free(pool, node) do { \
+     if ((pool)->avail < (pool)->size) { \
+         (pool)->avail++; \
+diff --git a/src/amf/context.c b/src/amf/context.c
+index c58053911..115ad8379 100644
+--- a/src/amf/context.c
++++ b/src/amf/context.c
+@@ -54,6 +54,8 @@ void amf_context_init(void)
+     ogs_log_install_domain(&__ogs_nas_domain, "nas", ogs_core()->log.level);
+     ogs_log_install_domain(&__amf_log_domain, "amf", ogs_core()->log.level);
+     ogs_log_install_domain(&__gmm_log_domain, "gmm", ogs_core()->log.level);
++    /* PANIC: contexto persistente (libogsdbi) */
++    ogs_log_install_domain(&__ogs_dbi_domain, "dbi", ogs_core()->log.level);
+ 
+     ogs_list_init(&self.ngap_list);
+     ogs_list_init(&self.ngap_list6);
+@@ -137,6 +139,9 @@ static int amf_context_prepare(void)
+     /* PANIC: UE inalcançável continua a ser chamado (como no Open5GS) */
+     self.reachability.reject_when_unreachable = false;
+ 
++    /* PANIC: sem contexto persistente (como no Open5GS) */
++    self.persistence.enabled = false;
++
+     return OGS_OK;
+ }
+ 
+@@ -1145,6 +1150,22 @@ int amf_context_parse_config(void)
+                         else
+                             ogs_warn("unknown key `%s`", reach_key);
+                     }
++                } else if (!strcmp(amf_key, "persistence")) {
++                    /* PANIC: contexto persistente (fase 1b) */
++                    ogs_yaml_iter_t pers_iter;
++                    ogs_yaml_iter_recurse(&amf_iter, &pers_iter);
++
++                    while (ogs_yaml_iter_next(&pers_iter)) {
++                        const char *pers_key =
++                            ogs_yaml_iter_key(&pers_iter);
++                        ogs_assert(pers_key);
++
++                        if (!strcmp(pers_key, "enabled"))
++                            self.persistence.enabled =
++                                ogs_yaml_iter_bool(&pers_iter);
++                        else
++                            ogs_warn("unknown key `%s`", pers_key);
++                    }
+                 } else if (!strcmp(amf_key, "default")) {
+                     /* handle config in sbi library */
+                 } else if (!strcmp(amf_key, "sbi")) {
+diff --git a/src/amf/context.h b/src/amf/context.h
+index e1afd5d15..1fa828098 100644
+--- a/src/amf/context.h
++++ b/src/amf/context.h
+@@ -24,6 +24,7 @@
+ #include "ogs-sbi.h"
+ #include "ogs-sctp.h"
+ #include "ogs-ngap.h"
++#include "ogs-dbi.h"
+ #include "ogs-nas-5gs.h"
+ 
+ #include "amf-sm.h"
+@@ -165,6 +166,16 @@ typedef struct amf_context_s {
+         bool reject_when_unreachable;
+     } reachability;
+ 
++    /*
++     * PANIC: contexto persistente (fase 1b). Com enabled, o AMF guarda no
++     * MongoDB (db_uri) a parte estável do contexto de cada UE registado e
++     * reconstrói-a no arranque, para a frota voltar sem autenticação depois de
++     * um reinício do core.
++     */
++    struct {
++        bool enabled;
++    } persistence;
++
+ } amf_context_t;
+ 
+ typedef struct amf_gnb_s {
+diff --git a/src/amf/init.c b/src/amf/init.c
+index 1ee5c9b14..2fe9b292c 100644
+--- a/src/amf/init.c
++++ b/src/amf/init.c
+@@ -59,6 +59,16 @@ int amf_initialize(void)
+     rv = amf_context_nf_info();
+     if (rv != OGS_OK) return rv;
+ 
++    /* PANIC: contexto persistente (fase 1b) no MongoDB de db_uri */
++    if (amf_self()->persistence.enabled) {
++        if (!ogs_app()->db_uri) {
++            ogs_error("amf.persistence.enabled needs db_uri");
++            return OGS_ERROR;
++        }
++        rv = ogs_dbi_init(ogs_app()->db_uri);
++        if (rv != OGS_OK) return rv;
++    }
++
+     ogs_metrics_context_open(ogs_metrics_self());
+ 
+     /* dumpers /gnb-info /ue-info */
+@@ -117,6 +127,9 @@ void amf_terminate(void)
+ 
+     ogs_metrics_context_close(ogs_metrics_self());
+ 
++    if (amf_self()->persistence.enabled)
++        ogs_dbi_final();
++
+     amf_context_final();
+     ogs_sbi_context_final();
+ 
+diff --git a/src/amf/meson.build b/src/amf/meson.build
+index e626fb929..c5297cd85 100644
+--- a/src/amf/meson.build
++++ b/src/amf/meson.build
+@@ -69,7 +69,8 @@ libamf_sources = files('''
+ 
+ libamf = static_library('amf',
+     sources : libamf_sources,
+-    dependencies : [libmetrics_dep,
++    dependencies : [libdbi_dep,
++                    libmetrics_dep,
+                     libsctp_dep,
+                     libngap_dep,
+                     libnas_5gs_dep,
+@@ -78,7 +79,8 @@ libamf = static_library('amf',
+ 
+ libamf_dep = declare_dependency(
+     link_with : libamf,
+-    dependencies : [libmetrics_dep,
++    dependencies : [libdbi_dep,
++                    libmetrics_dep,
+                     libsctp_dep,
+                     libngap_dep,
+                     libnas_5gs_dep,
+diff --git a/src/smf/context.c b/src/smf/context.c
+index f26fef794..d859de79f 100644
+--- a/src/smf/context.c
++++ b/src/smf/context.c
+@@ -82,6 +82,8 @@ void smf_context_init(void)
+     ogs_log_install_domain(&__ogs_diam_domain, "diam", ogs_core()->log.level);
+     ogs_log_install_domain(&__smf_log_domain, "smf", ogs_core()->log.level);
+     ogs_log_install_domain(&__gsm_log_domain, "gsm", ogs_core()->log.level);
++    /* PANIC: persistent context (libogsdbi) */
++    ogs_log_install_domain(&__ogs_dbi_domain, "dbi", ogs_core()->log.level);
+ 
+     ogs_pool_init(&smf_gtp_node_pool, ogs_app()->pool.nf);
+     ogs_pool_init(&smf_ue_pool, ogs_global_conf()->max.ue);
+@@ -166,6 +168,7 @@ static int smf_context_prepare(void)
+     self.diam_config->cnf_port_tls = DIAMETER_SECURE_PORT;
+ 
+     self.dl_buffering.drop_when_unreachable = false;
++    self.persistence.enabled = false;
+ 
+     return OGS_OK;
+ }
+@@ -1003,6 +1006,20 @@ int smf_context_parse_config(void)
+                         } else
+                             ogs_warn("unknown key `%s`", dl_buffering_key);
+                     }
++                } else if (!strcmp(smf_key, "persistence")) {
++                    /* PANIC: smf.persistence.enabled */
++                    ogs_yaml_iter_t persistence_iter;
++                    ogs_yaml_iter_recurse(&smf_iter, &persistence_iter);
++                    while (ogs_yaml_iter_next(&persistence_iter)) {
++                        const char *persistence_key =
++                            ogs_yaml_iter_key(&persistence_iter);
++                        ogs_assert(persistence_key);
++                        if (!strcmp(persistence_key, "enabled")) {
++                            self.persistence.enabled =
++                                ogs_yaml_iter_bool(&persistence_iter);
++                        } else
++                            ogs_warn("unknown key `%s`", persistence_key);
++                    }
+                 } else if (!strcmp(smf_key, "pfcp")) {
+                     /* handle config in pfcp library */
+                 } else if (!strcmp(smf_key, "upf")) {
+diff --git a/src/smf/context.h b/src/smf/context.h
+index beda70b72..7345773dc 100644
+--- a/src/smf/context.h
++++ b/src/smf/context.h
+@@ -32,6 +32,7 @@
+ #include "ogs-app.h"
+ #include "ogs-ngap.h"
+ #include "ogs-nas-5gs.h"
++#include "ogs-dbi.h"
+ #include "ipfw/ogs-ipfw.h"
+ 
+ #include "timer.h"
+@@ -164,6 +165,15 @@ typedef struct smf_context_s {
+         bool drop_when_unreachable;
+     } dl_buffering;
+ 
++    /*
++     * PANIC: persistent context (phase 1b). When enabled, the SMF stores the
++     * stable part of each PDU session in MongoDB (db_uri) and rebuilds it at
++     * start-up, so sessions (same UE IP) survive a core restart.
++     */
++    struct {
++        bool enabled;
++    } persistence;
++
+ #define SMF_UE_IS_LAST_SESSION(__sMF) \
+      ((__sMF) && (ogs_list_count(&(__sMF)->sess_list)) == 1)
+     ogs_list_t      smf_ue_list;
+diff --git a/src/smf/init.c b/src/smf/init.c
+index 61d3951ea..a0eb9015b 100644
+--- a/src/smf/init.c
++++ b/src/smf/init.c
+@@ -76,6 +76,16 @@ int smf_initialize(void)
+     rv = ogs_pfcp_ue_pool_generate();
+     if (rv != OGS_OK) return rv;
+ 
++    /* PANIC: persistent context (phase 1b) in the MongoDB of db_uri */
++    if (smf_self()->persistence.enabled) {
++        if (!ogs_app()->db_uri) {
++            ogs_error("smf.persistence.enabled needs db_uri");
++            return OGS_ERROR;
++        }
++        rv = ogs_dbi_init(ogs_app()->db_uri);
++        if (rv != OGS_OK) return rv;
++    }
++
+     ogs_metrics_context_open(ogs_metrics_self());
+ 
+     rv = smf_fd_init();
+@@ -140,6 +150,9 @@ void smf_terminate(void)
+ 
+     ogs_metrics_context_close(ogs_metrics_self());
+ 
++    if (smf_self()->persistence.enabled)
++        ogs_dbi_final();
++
+     smf_fd_final();
+ 
+     smf_context_final();
+diff --git a/src/smf/meson.build b/src/smf/meson.build
+index b501710e4..aab4e5c45 100644
+--- a/src/smf/meson.build
++++ b/src/smf/meson.build
+@@ -119,7 +119,8 @@ libsmf_sources = files('''
+ 
+ libsmf = static_library('smf',
+     sources : libsmf_sources,
+-    dependencies : [libmetrics_dep,
++    dependencies : [libdbi_dep,
++                    libmetrics_dep,
+                     libsbi_dep,
+                     libngap_dep,
+                     libnas_5gs_dep,
+@@ -131,7 +132,8 @@ libsmf = static_library('smf',
+ 
+ libsmf_dep = declare_dependency(
+     link_with : libsmf,
+-    dependencies : [libmetrics_dep,
++    dependencies : [libdbi_dep,
++                    libmetrics_dep,
+                     libsbi_dep,
+                     libngap_dep,
+                     libnas_5gs_dep,

@@ -1,0 +1,12 @@
+# Variante contexto persistente (fase 1b, notes/core/fase1b-contexto-persistente.md): a configuração da
+# baseline com amf.persistence e smf.persistence ligadas e o db_uri do MongoDB do lab. O AMF e o SMF
+# guardam a parte estável de cada UE e de cada sessão e reconstroem-na no arranque.
+# Exige a imagem com os patches 0010–0013 (lab/patches/open5gs/).
+#
+# Uso: VARIANTE=persistente ./scripts/cenario-fabrica.sh <pasta> <nome>
+
+services:
+  amf:
+    volumes: [ ./variantes/persistente/config/open5gs/amf.yaml:/etc/open5gs/amf.yaml:ro ]
+  smf:
+    volumes: [ ./variantes/persistente/config/open5gs/smf.yaml:/etc/open5gs/smf.yaml:ro ]

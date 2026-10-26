@@ -71,6 +71,16 @@ mkdir -p "$OUT/$NAME-logs"
 CORE=$(docker compose config --services | grep -vx -e ue -e vitimas | tr '\n' ' ')
 TEMPORIZADOR=$(awk '/^inactivityTimer:/{print $2}' variantes/idle/config/ueransim/gnb.yaml)
 
+# Escritas do contexto persistente (fase 1b): inserções, atualizações e remoções nas coleções do AMF e
+# do SMF, contadas pelo MongoDB (comando top). 0 sem a variante persistente.
+escritas_mongo() {
+    docker compose exec -T mongodb mongosh --quiet --eval '
+        var t = db.adminCommand({top: 1}).totals, n = 0;
+        ["open5gs.amf_contexts", "open5gs.smf_sessions"].forEach(function (c) {
+            if (t[c]) n += t[c].insert.count + t[c].update.count + t[c].remove.count; });
+        print(n)' 2>/dev/null | tail -1 || echo 0
+}
+
 snap() {
     for s in $(docker compose ps --services --status running); do
         id=$(docker compose ps -q "$s")
@@ -111,6 +121,13 @@ docker compose up --no-start >/dev/null 2>&1
 dumpcap -q -i br-n2 -i br-sbi -i br-n4 -w "$OUT/$NAME.pcapng" >/dev/null 2>&1 &
 CAP=$!
 sleep 2
+
+# Contexto persistente (fase 1b): começar sem os registos de corridas anteriores, que o AMF e o SMF
+# restaurariam no arranque (o volume do MongoDB sobrevive ao down). Sem a variante não há coleções.
+docker compose up -d mongodb >/dev/null 2>&1
+sleep 3
+docker compose exec -T mongodb mongosh --quiet open5gs \
+    --eval 'db.amf_contexts.drop(); db.smf_sessions.drop()' >/dev/null 2>&1 || true
 
 docker compose up -d $CORE >/dev/null 2>&1
 sleep "$ESPERA_CORE"
@@ -159,8 +176,10 @@ sleep "$APRENDIZAGEM"
 
 T_INICIO=$(date +%s.%N)
 snap I
+ESCRITAS_I=$(escritas_mongo)
 wait $TRAFEGO
 snap F
+ESCRITAS_F=$(escritas_mongo)
 T_FIM=$(date +%s.%N)
 
 kill $CAP; wait $CAP 2>/dev/null || true
@@ -204,6 +223,8 @@ t_repouso=$T_REPOUSO
 repouso=$REPOUSO
 t_inicio=$T_INICIO
 t_fim=$T_FIM
+escritas_mongo_inicio=$ESCRITAS_I
+escritas_mongo_fim=$ESCRITAS_F
 servicos_core=$CORE
 populacao=$POPULACAO
 aprendizagem=$APRENDIZAGEM

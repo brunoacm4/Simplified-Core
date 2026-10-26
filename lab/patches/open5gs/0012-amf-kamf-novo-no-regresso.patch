@@ -1,0 +1,322 @@
+AMF: K_AMF novo no regresso de um contexto restaurado
+
+Um contexto restaurado do 0011 traz contadores NAS possivelmente atrasados:
+com a chave antiga, o AMF repetiria valores do contador de descida (o UE
+descarta a mensagem; com cifra seria reutilização do fluxo de cifra). Na
+primeira mensagem do UE depois do restauro (registo ou Service Request), o AMF
+verifica-a com o K_AMF e o contador guardados, deriva o K_AMF' (TS 33.501
+Anexo A.13, DIRECTION 0x00, COUNT = contador de subida da mensagem) e manda um
+Security Mode Command com o K_AMF_change_flag (TS 33.501 6.7.2); os contadores
+recomeçam do zero com a chave nova. No Security Mode Complete retoma o
+procedimento como num UE conhecido, sem o registo no UDM. Um UE restaurado não
+recria a subscrição no UDM nem a política no PCF até um registo inicial.
+
+Testado no lab (reinício só do AMF, 5 UEs; UERANSIM com o patch 0006):
+Service Request -> Security Mode Command (K_AMF novo) -> Service Accept, dados
+a passar nos 5; registo periódico -> Security Mode Command -> Registration
+Accept nos 5, 0 autenticações e nenhum SBI ao UDM nem ao PCF.
+
+Commit 46fec8135 no ramo panic/v2.8.0 do fork.
+
+diff --git a/lib/crypt/ogs-kdf.c b/lib/crypt/ogs-kdf.c
+index fd670cb10..1aa25f4fc 100644
+--- a/lib/crypt/ogs-kdf.c
++++ b/lib/crypt/ogs-kdf.c
+@@ -29,6 +29,7 @@
+ #define FC_FOR_KAMF_DERIVATION                  0x6D
+ #define FC_FOR_KGNB_KN3IWF_DERIVATION           0x6E
+ #define FC_FOR_NH_GNB_DERIVATION                0x6F
++#define FC_FOR_KAMF_PRIME_DERIVATION            0x72
+ 
+ #define FC_FOR_KASME                            0x10
+ #define FC_FOR_KENB_DERIVATION                  0x11
+@@ -252,6 +253,31 @@ void ogs_kdf_kgnb_and_kn3iwf(const uint8_t *kamf, uint32_t ul_count,
+             FC_FOR_KGNB_KN3IWF_DERIVATION, param, kgnb);
+ }
+ 
++/*
++ * TS33.501 Annex A.13 KAMF to KAMF' derivation in mobility
++ * (PANIC: also used to give a restored context a fresh KAMF). In idle mode
++ * mobility, DIRECTION is 0x00 and COUNT is the uplink NAS COUNT used in the
++ * Registration Request; in handover, 0x01 and the downlink NAS COUNT.
++ */
++void ogs_kdf_kamf_prime(const uint8_t *kamf, uint8_t direction,
++        uint32_t count, uint8_t *kamf_prime)
++{
++    kdf_param_t param;
++
++    ogs_assert(kamf);
++    ogs_assert(kamf_prime);
++
++    memset(param, 0, sizeof(param));
++    param[0].buf = &direction;
++    param[0].len = 1;
++    count = htobe32(count);
++    param[1].buf = (uint8_t *)&count;
++    param[1].len = 4;
++
++    ogs_kdf_common(kamf, OGS_SHA256_DIGEST_SIZE,
++            FC_FOR_KAMF_PRIME_DERIVATION, param, kamf_prime);
++}
++
+ /* TS33.501 Annex A.10 NH derivation function */
+ void ogs_kdf_nh_gnb(const uint8_t *kamf, uint8_t *sync_input, uint8_t *kgnb)
+ {
+diff --git a/lib/crypt/ogs-kdf.h b/lib/crypt/ogs-kdf.h
+index b87c3ae26..2e92d4fe1 100644
+--- a/lib/crypt/ogs-kdf.h
++++ b/lib/crypt/ogs-kdf.h
+@@ -77,6 +77,10 @@ void ogs_kdf_kgnb_and_kn3iwf(const uint8_t *kamf, uint32_t ul_count,
+ /* TS33.501 Annex A.10 NH derivation function */
+ void ogs_kdf_nh_gnb(const uint8_t *kamf, uint8_t *sync_input, uint8_t *kgnb);
+ 
++/* TS33.501 Annex A.13 KAMF to KAMF' derivation in mobility (PANIC) */
++void ogs_kdf_kamf_prime(const uint8_t *kamf, uint8_t direction,
++        uint32_t count, uint8_t *kamf_prime);
++
+ /*
+  * TS33.501 Annex C.3.4.1 Profile A
+  * TS33.501 Annex C.3.4.2 Profile B
+diff --git a/src/amf/context.c b/src/amf/context.c
+index 4940c20a4..3f9bfc96b 100644
+--- a/src/amf/context.c
++++ b/src/amf/context.c
+@@ -1683,6 +1683,28 @@ void amf_ue_confirm_guti(amf_ue_t *amf_ue)
+     amf_persistence_save(amf_ue);
+ }
+ 
++/*
++ * PANIC: contexto persistente (fase 1b). K_AMF novo para um contexto
++ * restaurado, antes de responder à primeira mensagem do UE: derivação
++ * horizontal (TS 33.501 Anexo A.13, como no registo de mobilidade:
++ * DIRECTION 0x00, COUNT = contador de subida da mensagem acabada de
++ * verificar). O Security Mode Command seguinte leva o K_AMF_change_flag; as
++ * chaves NAS derivam-se do K_AMF' ao construí-lo e os contadores voltam a 0
++ * (contexto novo). Assim nunca se repete um contador com a chave antiga.
++ */
++void amf_ue_kamf_change(amf_ue_t *amf_ue)
++{
++    uint8_t kamf_prime[OGS_SHA256_DIGEST_SIZE];
++
++    ogs_assert(amf_ue);
++
++    ogs_kdf_kamf_prime(amf_ue->kamf, 0x00, amf_ue->ul_count.i32, kamf_prime);
++    memcpy(amf_ue->kamf, kamf_prime, OGS_SHA256_DIGEST_SIZE);
++
++    ogs_info("[%s] Restored context: new K_AMF (horizontal derivation, "
++            "UL COUNT %u)", amf_ue->supi, amf_ue->ul_count.i32);
++}
++
+ amf_ue_t *amf_ue_add(ran_ue_t *ran_ue)
+ {
+     amf_gnb_t *gnb = NULL;
+diff --git a/src/amf/context.h b/src/amf/context.h
+index 380e61262..a812fbdf6 100644
+--- a/src/amf/context.h
++++ b/src/amf/context.h
+@@ -706,11 +706,15 @@ struct amf_ue_s {
+ 
+     /*
+      * PANIC: contexto persistente (fase 1b). restored: o contexto veio da base
+-     * de dados no arranque (a primeira mensagem do UE leva a chave nova);
+-     * persisted_ul_count: o último contador de subida gravado.
++     * de dados no arranque, sem subscrição no UDM nem política no PCF (só se
++     * recriam num registo inicial); persisted_ul_count: o último contador de
++     * subida gravado; kamf_change: a próxima mensagem do UE leva um Security
++     * Mode Command com K_AMF novo (TS 33.501 6.7.2 e Anexo A.13), para não
++     * repetir contadores NAS com a chave antiga.
+      */
+     bool restored;
+     uint32_t persisted_ul_count;
++    bool kamf_change;
+ 
+     /* UE Radio Capability */
+     OCTET_STRING_t  ueRadioCapability;
+@@ -1077,6 +1081,7 @@ ran_ue_t *ran_ue_find_by_id(ogs_pool_id_t id);
+ 
+ void amf_ue_new_guti(amf_ue_t *amf_ue);
+ void amf_ue_confirm_guti(amf_ue_t *amf_ue);
++void amf_ue_kamf_change(amf_ue_t *amf_ue);
+ 
+ amf_ue_t *amf_ue_add(ran_ue_t *ran_ue);
+ ogs_time_t amf_ue_implicit_deregistration_duration(amf_ue_t *amf_ue);
+diff --git a/src/amf/gmm-build.c b/src/amf/gmm-build.c
+index 8d7ec5ae9..46f148008 100644
+--- a/src/amf/gmm-build.c
++++ b/src/amf/gmm-build.c
+@@ -471,6 +471,9 @@ ogs_pkbuf_t *gmm_build_security_mode_command(amf_ue_t *amf_ue)
+     additional_security_information->length = 1;
+     additional_security_information->
+         retransmission_of_initial_nas_message_request = 1;
++    /* PANIC: K_AMF_change_flag (o K_AMF' já foi derivado, amf_ue_kamf_change) */
++    if (amf_ue->kamf_change)
++        additional_security_information->horizontal_derivation_parameter = 1;
+ 
+     ogs_assert(amf_ue->selected_int_algorithm !=
+             OGS_NAS_SECURITY_ALGORITHMS_EIA0);
+diff --git a/src/amf/gmm-sm.c b/src/amf/gmm-sm.c
+index b65b7bde4..5ce9e8af4 100644
+--- a/src/amf/gmm-sm.c
++++ b/src/amf/gmm-sm.c
+@@ -1775,6 +1775,14 @@ static void common_register_state(ogs_fsm_t *s, amf_event_t *e,
+                  */
+                 CLEAR_NG_CONTEXT(amf_ue);
+ 
++                /* PANIC: contexto restaurado: K_AMF novo antes de continuar;
++                 * o registo retoma no Security Mode Complete */
++                if (amf_ue->kamf_change) {
++                    amf_ue_kamf_change(amf_ue);
++                    OGS_FSM_TRAN(s, &gmm_state_security_mode);
++                    break;
++                }
++
+                 gmm_cause = gmm_handle_registration_update(
+                         ran_ue, amf_ue, &nas_message->gmm.registration_request);
+                 if (gmm_cause != OGS_5GMM_CAUSE_REQUEST_ACCEPTED) {
+@@ -1801,7 +1809,10 @@ static void common_register_state(ogs_fsm_t *s, amf_event_t *e,
+                         break;
+                     }
+ 
+-                    if (!UDM_SDM_SUBSCRIBED(amf_ue)) {
++                    /* PANIC: num contexto restaurado não se recriam a
++                     * subscrição no UDM nem a política no PCF (decisão 2 da
++                     * fase 1b: só quando forem precisas, no registo inicial) */
++                    if (!UDM_SDM_SUBSCRIBED(amf_ue) && !amf_ue->restored) {
+                         r = amf_ue_sbi_discover_and_send(
+                                 OpenAPI_service_name_nudm_uecm, NULL,
+                                 amf_nudm_uecm_build_registration,
+@@ -1810,7 +1821,8 @@ static void common_register_state(ogs_fsm_t *s, amf_event_t *e,
+                         ogs_assert(r != OGS_ERROR);
+                         OGS_FSM_TRAN(s, &gmm_state_initial_context_setup);
+                         break;
+-                    } else if (!PCF_AM_POLICY_ASSOCIATED(amf_ue)) {
++                    } else if (!PCF_AM_POLICY_ASSOCIATED(amf_ue) &&
++                            !amf_ue->restored) {
+                         r = amf_ue_sbi_discover_and_send(
+                                 OpenAPI_service_name_npcf_am_policy_control,
+                                 NULL,
+@@ -1912,6 +1924,14 @@ static void common_register_state(ogs_fsm_t *s, amf_event_t *e,
+              */
+             CLEAR_NG_CONTEXT(amf_ue);
+ 
++            /* PANIC: contexto restaurado: K_AMF novo antes de continuar;
++             * o Service Request retoma no Security Mode Complete */
++            if (amf_ue->kamf_change) {
++                amf_ue_kamf_change(amf_ue);
++                OGS_FSM_TRAN(s, &gmm_state_security_mode);
++                break;
++            }
++
+             gmm_cause = gmm_handle_service_update(
+                     ran_ue, amf_ue, &nas_message->gmm.service_request);
+             if (gmm_cause != OGS_5GMM_CAUSE_REQUEST_ACCEPTED) {
+@@ -2532,7 +2552,7 @@ void gmm_state_authentication(ogs_fsm_t *s, amf_event_t *e)
+ 
+ void gmm_state_security_mode(ogs_fsm_t *s, amf_event_t *e)
+ {
+-    int r;
++    int r, xact_count = 0;
+     ogs_nas_5gmm_cause_t gmm_cause;
+     amf_ue_t *amf_ue = NULL;
+     ran_ue_t *ran_ue = NULL;
+@@ -2615,6 +2635,21 @@ void gmm_state_security_mode(ogs_fsm_t *s, amf_event_t *e)
+ 
+             CLEAR_AMF_UE_TIMER(amf_ue->t3560);
+ 
++            /*
++             * PANIC: contexto restaurado com K_AMF novo. A mensagem inicial
++             * (no contentor) é tratada já a seguir como a de um UE conhecido,
++             * e o Service Request pode mandar logo o Initial Context Setup:
++             * o KgNB tem de vir já do K_AMF novo.
++             */
++            if (amf_ue->kamf_change) {
++                xact_count = amf_sess_xact_count(amf_ue);
++                ogs_kdf_kgnb_and_kn3iwf(
++                        amf_ue->kamf, amf_ue->ul_count.i32,
++                        amf_ue->nas.access_type, amf_ue->kgnb);
++                ogs_kdf_nh_gnb(amf_ue->kamf, amf_ue->kgnb, amf_ue->nh);
++                amf_ue->nhcc = 1;
++            }
++
+             gmm_cause = gmm_handle_security_mode_complete(
+                     amf_ue, &nas_message->gmm.security_mode_complete);
+             if (gmm_cause != OGS_5GMM_CAUSE_REQUEST_ACCEPTED) {
+@@ -2628,6 +2663,47 @@ void gmm_state_security_mode(ogs_fsm_t *s, amf_event_t *e)
+                 break;
+             }
+ 
++            /*
++             * PANIC: retomar o registo periódico ou o Service Request como num
++             * UE conhecido: sem registo no UDM nem os pedidos do registo
++             * inicial (como no estado registado, common_register_state).
++             */
++            if (amf_ue->kamf_change) {
++                amf_ue->kamf_change = false;
++                amf_persistence_save(amf_ue);
++
++                if (amf_ue->nas.message_type ==
++                        OGS_NAS_5GS_REGISTRATION_REQUEST) {
++                    if (amf_sess_xact_count(amf_ue) == xact_count) {
++                        if (amf_update_allowed_nssai(amf_ue) == false) {
++                            ogs_error("No Allowed-NSSAI");
++                            r = nas_5gs_send_gmm_reject(
++                                    ran_ue, amf_ue,
++                                    OGS_5GMM_CAUSE_NO_NETWORK_SLICES_AVAILABLE);
++                            ogs_expect(r == OGS_OK);
++                            ogs_assert(r != OGS_ERROR);
++                            OGS_FSM_TRAN(s, gmm_state_exception);
++                            break;
++                        }
++                        CLEAR_AMF_UE_TIMER(amf_ue->t3550);
++                        r = nas_5gs_send_registration_accept(amf_ue);
++                        ogs_expect(r == OGS_OK);
++                        ogs_assert(r != OGS_ERROR);
++                    }
++                    if (amf_ue->next.m_tmsi)
++                        OGS_FSM_TRAN(s, &gmm_state_initial_context_setup);
++                    else
++                        OGS_FSM_TRAN(s, &gmm_state_registered);
++                } else {
++                    OGS_FSM_TRAN(s, &gmm_state_registered);
++                }
++                break;
++            }
++
++            /* PANIC: autenticação e contexto novos: daqui em diante o UE
++             * volta a ter subscrição no UDM e política no PCF */
++            amf_ue->restored = false;
++
+             if (amf_ue->amf_ue_context_transfer_state ==
+                     UE_CONTEXT_TRANSFER_NEW_AMF_STATE) {
+                 /*
+@@ -3533,6 +3609,14 @@ void gmm_state_exception(ogs_fsm_t *s, amf_event_t *e)
+                  */
+                 CLEAR_NG_CONTEXT(amf_ue);
+ 
++                /* PANIC: contexto restaurado: K_AMF novo antes de continuar;
++                 * o registo retoma no Security Mode Complete */
++                if (amf_ue->kamf_change) {
++                    amf_ue_kamf_change(amf_ue);
++                    OGS_FSM_TRAN(s, &gmm_state_security_mode);
++                    break;
++                }
++
+                 gmm_cause = gmm_handle_registration_update(
+                         ran_ue, amf_ue, &nas_message->gmm.registration_request);
+                 if (gmm_cause != OGS_5GMM_CAUSE_REQUEST_ACCEPTED) {
+diff --git a/src/amf/persistence.c b/src/amf/persistence.c
+index 90df21834..222d4906e 100644
+--- a/src/amf/persistence.c
++++ b/src/amf/persistence.c
+@@ -471,8 +471,10 @@ static bool restore_one(const bson_t *doc)
+     amf_ue->mac_failed = 0;
+     amf_ue->persisted_ul_count = amf_ue->ul_count.i32;
+ 
+-    /* Na primeira mensagem, chave nova (fase 1b, patch 0012) */
++    /* Na primeira mensagem, chave nova (o contador de descida guardado pode
++     * estar atrasado: com a chave antiga repetiria valores) */
+     amf_ue->restored = true;
++    amf_ue->kamf_change = true;
+ 
+     /* Registado e em CM-IDLE: o mobile reachable timer corre desde já */
+     memset(&e, 0, sizeof(e));

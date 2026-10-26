@@ -1,0 +1,202 @@
+gNB: voltar a ligar ao AMF depois de perder a associação (amfReconnect)
+
+O gNB liga-se a cada AMF configurado uma só vez, no arranque. Se a ligação
+SCTP falhar (o AMF ainda não está pronto) ou se a associação cair (o core
+reiniciou), apaga o contexto do AMF e nunca mais tenta
+(src/gnb/ngap/interface.cpp, handleAssociationShutdown; src/gnb/sctp/task.cpp,
+receiveSctpConnectionSetupRequest). Depois de um reinício do core o gNB fica
+sem AMF até ser reiniciado, o que não é o comportamento de um gNB real e
+impede medir o reinício do core sem reiniciar também a RAN.
+
+Nova chave amfReconnect no gnb.yaml (segundos; 0 = desligado, por omissão):
+ao perder a associação, e também a partir do arranque, o NGAP volta a tentar
+de amfReconnect em amfReconnect segundos enquanto houver um AMF configurado por
+ligar, e refaz o NG Setup. As células continuam no ar: o NG Setup seguinte não
+volta a ligar o rádio, porque o gNB já está inicializado.
+
+Medido no lab (variante idle com amfReconnect: 2, reinício das 11 funções do
+core com 100 UEs adormecidos): o gNB voltou a ligar e fez o NG Setup 2 s
+depois de a associação cair; os 100 UEs voltaram
+(notes/experiencias/2026-10-25-fase1b-etapa0).
+
+Commit bb48cb9 no ramo panic/v3.3.0 do fork.
+
+diff --git a/src/gnb.cpp b/src/gnb.cpp
+index 1edf6aa..8c17a48 100644
+--- a/src/gnb.cpp
++++ b/src/gnb.cpp
+@@ -65,6 +65,12 @@ static nr::gnb::GnbConfig *ReadConfigYaml()
+     result->minConnectionTime = yaml::HasField(config, "minConnectionTime")
+                                     ? yaml::GetInt32(config, "minConnectionTime", 0, 86400)
+                                     : 5;
++
++    // Voltar a ligar ao AMF (opcional). Sem isto, se a associação SCTP cair (por exemplo, o core
++    // reiniciou), o gNB fica sem AMF até ser reiniciado; um gNB real volta a tentar. 0 desliga.
++    result->amfReconnect = yaml::HasField(config, "amfReconnect")
++                               ? yaml::GetInt32(config, "amfReconnect", 0, 3600)
++                               : 0;
+     result->pagingDrx = EPagingDrx::V128;
+     result->name = "UERANSIM-gnb-" + std::to_string(result->plmn.mcc) + "-" + std::to_string(result->plmn.mnc) + "-" +
+                    std::to_string(result->getGnbId()); // NOTE: Avoid using "/" dir separator character.
+diff --git a/src/gnb/ngap/interface.cpp b/src/gnb/ngap/interface.cpp
+index 313eba3..a2b3de5 100644
+--- a/src/gnb/ngap/interface.cpp
++++ b/src/gnb/ngap/interface.cpp
+@@ -104,6 +104,10 @@ void NgapTask::handleAssociationShutdown(int amfId)
+     m_base->sctpTask->push(std::move(w));
+ 
+     deleteAmfContext(amfId);
++
++    // Voltar a tentar daqui a amfReconnect segundos, como um gNB real (0 = ficar sem AMF, como antes)
++    if (m_base->config->amfReconnect > 0)
++        setTimer(TIMER_ID_AMF_RECONNECT, static_cast<int64_t>(m_base->config->amfReconnect) * 1000);
+ }
+ 
+ void NgapTask::sendNgSetupRequest(int amfId)
+diff --git a/src/gnb/ngap/management.cpp b/src/gnb/ngap/management.cpp
+index 8a33b54..5821974 100644
+--- a/src/gnb/ngap/management.cpp
++++ b/src/gnb/ngap/management.cpp
+@@ -23,7 +23,7 @@ NgapAmfContext *NgapTask::findAmfContext(int ctxId)
+     return ctx;
+ }
+ 
+-void NgapTask::createAmfContext(const GnbAmfConfig &conf)
++NgapAmfContext *NgapTask::createAmfContext(const GnbAmfConfig &conf)
+ {
+     auto *ctx = new NgapAmfContext();
+     ctx->ctxId = utils::NextId();
+@@ -31,6 +31,7 @@ void NgapTask::createAmfContext(const GnbAmfConfig &conf)
+     ctx->address = conf.address;
+     ctx->port = conf.port;
+     m_amfCtx[ctx->ctxId] = ctx;
++    return ctx;
+ }
+ 
+ void NgapTask::createUeContext(int ueId)
+diff --git a/src/gnb/ngap/task.cpp b/src/gnb/ngap/task.cpp
+index c1be980..3b70c80 100644
+--- a/src/gnb/ngap/task.cpp
++++ b/src/gnb/ngap/task.cpp
+@@ -29,17 +29,62 @@ void NgapTask::onStart()
+         m_logger->warn("No AMF configuration is provided");
+ 
+     for (auto &amfCtx : m_amfCtx)
++        connectAmf(amfCtx.second);
++
++    // Se o AMF ainda não estiver pronto, a primeira tentativa falha: voltar a tentar
++    if (m_base->config->amfReconnect > 0)
++        setTimer(TIMER_ID_AMF_RECONNECT, static_cast<int64_t>(m_base->config->amfReconnect) * 1000);
++}
++
++void NgapTask::connectAmf(NgapAmfContext *amf)
++{
++    auto msg = std::make_unique<NmGnbSctp>(NmGnbSctp::CONNECTION_REQUEST);
++    msg->clientId = amf->ctxId;
++    msg->localAddress = m_base->config->ngapIp;
++    msg->localPort = 0;
++    msg->remoteAddress = amf->address;
++    msg->remotePort = amf->port;
++    msg->ppid = sctp::PayloadProtocolId::NGAP;
++    msg->associatedTask = this;
++    m_base->sctpTask->push(std::move(msg));
++}
++
++/*
++ * Volta a ligar aos AMFs configurados que não estão ligados (associação perdida ou tentativa falhada),
++ * e repete enquanto houver algum por ligar. As células continuam no ar: o NG Setup seguinte não volta a
++ * ligar o rádio, porque o gNB já está inicializado.
++ */
++void NgapTask::reconnectAmfs()
++{
++    bool pending = false;
++
++    for (auto &amfConfig : m_base->config->amfConfigs)
+     {
+-        auto msg = std::make_unique<NmGnbSctp>(NmGnbSctp::CONNECTION_REQUEST);
+-        msg->clientId = amfCtx.second->ctxId;
+-        msg->localAddress = m_base->config->ngapIp;
+-        msg->localPort = 0;
+-        msg->remoteAddress = amfCtx.second->address;
+-        msg->remotePort = amfCtx.second->port;
+-        msg->ppid = sctp::PayloadProtocolId::NGAP;
+-        msg->associatedTask = this;
+-        m_base->sctpTask->push(std::move(msg));
++        NgapAmfContext *amf = nullptr;
++        for (auto &ctx : m_amfCtx)
++            if (ctx.second->address == amfConfig.address && ctx.second->port == amfConfig.port)
++                amf = ctx.second;
++
++        // Ligado ou à espera da resposta ao NG Setup
++        if (amf != nullptr && amf->state != EAmfState::NOT_CONNECTED)
++            continue;
++
++        // Tentativa anterior falhou: fechar o que tiver ficado no SCTP e recomeçar
++        if (amf != nullptr)
++        {
++            auto w = std::make_unique<NmGnbSctp>(NmGnbSctp::CONNECTION_CLOSE);
++            w->clientId = amf->ctxId;
++            m_base->sctpTask->push(std::move(w));
++            deleteAmfContext(amf->ctxId);
++        }
++
++        m_logger->info("Trying to reconnect to AMF %s:%d", amfConfig.address.c_str(), amfConfig.port);
++        connectAmf(createAmfContext(amfConfig));
++        pending = true;
+     }
++
++    if (pending)
++        setTimer(TIMER_ID_AMF_RECONNECT, static_cast<int64_t>(m_base->config->amfReconnect) * 1000);
+ }
+ 
+ void NgapTask::onLoop()
+@@ -98,6 +143,12 @@ void NgapTask::onLoop()
+         }
+         break;
+     }
++    case NtsMessageType::TIMER_EXPIRED: {
++        auto &w = dynamic_cast<NmTimerExpired &>(*msg);
++        if (w.timerId == TIMER_ID_AMF_RECONNECT)
++            reconnectAmfs();
++        break;
++    }
+     default: {
+         m_logger->unhandledNts(*msg);
+         break;
+diff --git a/src/gnb/ngap/task.hpp b/src/gnb/ngap/task.hpp
+index ec0d613..7048f2d 100644
+--- a/src/gnb/ngap/task.hpp
++++ b/src/gnb/ngap/task.hpp
+@@ -68,8 +68,10 @@ class NgapTask : public NtsTask
+     void onQuit() override;
+ 
+   private:
++    static constexpr const int TIMER_ID_AMF_RECONNECT = 1;
++
+     /* Utility functions */
+-    void createAmfContext(const GnbAmfConfig &config);
++    NgapAmfContext *createAmfContext(const GnbAmfConfig &config);
+     NgapAmfContext *findAmfContext(int ctxId);
+     void createUeContext(int ueId);
+     NgapUeContext *findUeContext(int ctxId);
+@@ -80,6 +82,8 @@ class NgapTask : public NtsTask
+     void deleteAmfContext(int amfId);
+ 
+     /* Interface management */
++    void connectAmf(NgapAmfContext *amf);
++    void reconnectAmfs();
+     void handleAssociationSetup(int amfId, int ascId, int inCount, int outCount);
+     void handleAssociationShutdown(int amfId);
+     void sendNgSetupRequest(int amfId);
+diff --git a/src/gnb/types.hpp b/src/gnb/types.hpp
+index 46c0ea0..13acab3 100644
+--- a/src/gnb/types.hpp
++++ b/src/gnb/types.hpp
+@@ -338,6 +338,7 @@ struct GnbConfig
+     bool ignoreStreamIds{};
+     int inactivityTimer{};    // segundos sem dados do utilizador até libertar o UE; 0 = desligado
+     int minConnectionTime{};  // segundos após a criação do contexto antes de a libertação ser possível
++    int amfReconnect{};       // segundos entre tentativas de voltar a ligar a um AMF perdido; 0 = desligado
+     ECellAccessType cellAccessType{ECellAccessType::TerrestrialNr};
+ 
+     /* Assigned by program */

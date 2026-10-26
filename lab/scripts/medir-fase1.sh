@@ -123,6 +123,11 @@ arrancar() {  # <nome> <n_ues>
     dumpcap -q -i br-n2 -i br-sbi -i br-n4 -i br-n3 -w "$OUT/$1.pcapng" >/dev/null 2>&1 &
     CAP=$!
     sleep 2
+    # Contexto persistente (fase 1b): sem os registos de corridas anteriores (o volume sobrevive)
+    docker compose up -d mongodb >/dev/null 2>&1
+    sleep 3
+    docker compose exec -T mongodb mongosh --quiet open5gs \
+        --eval 'db.amf_contexts.drop(); db.smf_sessions.drop()' >/dev/null 2>&1 || true
     docker compose up -d $CORE mongodb gnb >/dev/null 2>&1
     sleep 40
     amostra "$OUT/$1.memoria.tsv" S0
@@ -374,6 +379,14 @@ if echo "$CORRIDAS" | grep -qw reinicio-core; then
     NOME=reinicio-core-n$N$SUF
     arrancar "$NOME" "$N"
     amostra "$OUT/$NOME.memoria.tsv" S1
+    # Registos do contexto persistente (vazio sem a persistência): quantos, tamanho médio, escritas
+    docker compose exec -T mongodb mongosh --quiet open5gs --eval '
+        var t = db.adminCommand({top: 1}).totals;
+        ["amf_contexts", "smf_sessions"].forEach(function (c) {
+            var s = db.getCollection(c).stats(), o = t["open5gs." + c];
+            print(c, "docs=" + (s.count || 0), "avgObjSize=" + (s.avgObjSize || 0),
+                  "escritas=" + (o ? o.insert.count + o.update.count + o.remove.count : 0)); })' \
+        > "$OUT/$NOME.mongo" 2>&1 || true
     desde=$(linhas_ue)
     setups=$(conta gnb "NG Setup procedure is successful")
     t0=$(agora)

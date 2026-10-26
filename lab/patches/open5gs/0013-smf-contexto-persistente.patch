@@ -1,0 +1,804 @@
+SMF: contexto persistente das sessões
+
+Com smf.persistence.enabled, o SMF guarda no MongoDB (coleção smf_sessions,
+um documento por SUPI e PSI) cada sessão 5GC IPv4 quando fica estabelecida:
+índice (= sm_context_ref que o AMF guarda), DNN, S-NSSAI, tipo, QoS, AMBR e
+IPv4; apaga-a quando é removida. No arranque reconstrói cada sessão no mesmo
+índice e com o mesmo IP (retirado do pool dinâmico, ogs_pfcp_ue_ip_reserve),
+operacional e inativa; quando a associação PFCP sobe monta as regras
+(smf_sess_build_default_rules, separada de
+smf_npcf_smpolicycontrol_handle_create, para ser a mesma montagem) e recria a
+sessão N4 com um Session Establishment normal: com a marca de restauro o UPF
+não devolve os PDRs criados, e os TEIDs que escolhe são precisos (não se
+guardam; o UE não os vê). Não se guarda o id do AMF (o UUID muda a cada
+arranque): sem ele, o N1N2 descobre o AMF. Uma sessão restaurada não tem
+política no PCF: ao ser libertada vai direta ao UDM.
+
+Testado no lab (reinício das 11 funções do core, o MongoDB fica, 5 UEs):
+5 UEs e 5 sessões restaurados, 5 sessões N4 recriadas; dados a passar com o
+mesmo IP, 0 autenticações; um ping da rede para um UE adormecido provoca
+paging e é entregue.
+
+Medido com 0010-0013 (notes/experiencias/2026-10-25-fase1b-medicoes, 100
+UEs adormecidos, reinício do core, dois envios de cada UE, 3 repetições):
+26,5 / 28,0 / 6 -> 14 / 6 / 10 (NGAP / SBI / PFCP) por dispositivo, 0
+autenticações, CPU do core no primeiro envio 897 -> 240 ms, latência no core
+147 -> 47 ms por UE. No cenário fábrica (100 UEs, 5 min) 0 escritas no
+MongoDB e o mesmo CPU, latência e mensagens; registos de ~750 bytes (AMF) e
+~240 bytes (SMF) por dispositivo.
+
+Commit a65cd27fb no ramo panic/v2.8.0 do fork.
+
+diff --git a/lib/core/ogs-pool.h b/lib/core/ogs-pool.h
+index 3981cdd2e..d8e4e7e20 100644
+--- a/lib/core/ogs-pool.h
++++ b/lib/core/ogs-pool.h
+@@ -183,6 +183,17 @@ typedef int32_t ogs_pool_id_t;
+     } \
+ } while (0)
+ 
++/* PANIC: ogs_pool_id_calloc() of a specific element (see ogs_pool_alloc_node) */
++#define ogs_pool_id_calloc_node(pool, node, target) do { \
++    ogs_pool_alloc_node(pool, node, target); \
++    if (*node) { \
++        memset(*(node), 0, sizeof(**(node))); \
++        (*(node))->id = OGS_NEXT_ID((pool)->id, 1, OGS_MAX_POOL_ID); \
++        ogs_hash_set((pool)->id_hash, \
++                &((*(node))->id), sizeof(ogs_pool_id_t), *(node)); \
++    } \
++} while (0)
++
+ #define ogs_pool_id_free(pool, node) do { \
+     ogs_assert(((node)->id) >= OGS_MIN_POOL_ID && \
+             ((node)->id) <= OGS_MAX_POOL_ID); \
+diff --git a/lib/pfcp/context.c b/lib/pfcp/context.c
+index 6dcb9f399..9a0a1b659 100644
+--- a/lib/pfcp/context.c
++++ b/lib/pfcp/context.c
+@@ -2368,6 +2368,49 @@ ogs_pfcp_ue_ip_t *ogs_pfcp_ue_ip_alloc(
+     return ue_ip;
+ }
+ 
++/*
++ * PANIC: persistent context (phase 1b). Take from the dynamic pool the
++ * address a restored session already had, so it is not given to another
++ * session (the subnet is chosen as in ogs_pfcp_ue_ip_alloc). NULL if the
++ * address is not free in that pool.
++ */
++ogs_pfcp_ue_ip_t *ogs_pfcp_ue_ip_reserve(
++        int family, const char *dnn, const uint8_t *addr)
++{
++    ogs_pfcp_subnet_t *subnet = NULL;
++    ogs_pfcp_ue_ip_t *ue_ip = NULL;
++    size_t maxbytes = 0;
++    int i;
++
++    ogs_assert(addr);
++
++    if (family == AF_INET)
++        maxbytes = 4;
++    else if (family == AF_INET6)
++        maxbytes = 16;
++    else
++        return NULL;
++
++    if (dnn)
++        subnet = ogs_pfcp_find_subnet_by_dnn(family, dnn);
++    else
++        subnet = ogs_pfcp_find_subnet(family);
++    if (subnet == NULL)
++        return NULL;
++
++    for (i = 0; i < ogs_pool_size(&subnet->pool); i++) {
++        if (memcmp(subnet->pool.array[i].addr, addr, maxbytes) == 0) {
++            ogs_pool_alloc_node(
++                    &subnet->pool, &ue_ip, &subnet->pool.array[i]);
++            break;
++        }
++    }
++    if (ue_ip)
++        ue_ip->subnet = subnet;
++
++    return ue_ip;
++}
++
+ void ogs_pfcp_ue_ip_free(ogs_pfcp_ue_ip_t *ue_ip)
+ {
+     ogs_pfcp_subnet_t *subnet = NULL;
+diff --git a/lib/pfcp/context.h b/lib/pfcp/context.h
+index 4eed68ae0..04b903c43 100644
+--- a/lib/pfcp/context.h
++++ b/lib/pfcp/context.h
+@@ -501,6 +501,8 @@ void ogs_pfcp_rule_remove_all(ogs_pfcp_pdr_t *pdr);
+ int ogs_pfcp_ue_pool_generate(void);
+ ogs_pfcp_ue_ip_t *ogs_pfcp_ue_ip_alloc(
+         uint8_t *cause_value, int family, const char *dnn, uint8_t *addr);
++ogs_pfcp_ue_ip_t *ogs_pfcp_ue_ip_reserve(
++        int family, const char *dnn, const uint8_t *addr);
+ void ogs_pfcp_ue_ip_free(ogs_pfcp_ue_ip_t *ip);
+ 
+ ogs_pfcp_dev_t *ogs_pfcp_dev_add(const char *ifname);
+diff --git a/src/smf/context.c b/src/smf/context.c
+index d859de79f..f2bf4f001 100644
+--- a/src/smf/context.c
++++ b/src/smf/context.c
+@@ -20,6 +20,7 @@
+ #include "context.h"
+ #include "gtp-path.h"
+ #include "pfcp-path.h"
++#include "persistence.h"
+ 
+ static smf_context_t self;
+ static ogs_diam_config_t g_diam_conf;
+@@ -1719,7 +1720,12 @@ smf_sess_t *smf_sess_add_by_gtp2_message(ogs_gtp2_message_t *message)
+     return sess;
+ }
+ 
+-smf_sess_t *smf_sess_add_by_psi(smf_ue_t *smf_ue, uint8_t psi)
++/*
++ * PANIC: index > 0 reserva esse lugar do pool (sessão restaurada do contexto
++ * persistente: o índice é o sm_context_ref que o AMF guardou). 0 = o
++ * comportamento de sempre.
++ */
++static smf_sess_t *sess_add_by_psi(smf_ue_t *smf_ue, uint8_t psi, int index)
+ {
+     smf_event_t e;
+ 
+@@ -1728,11 +1734,24 @@ smf_sess_t *smf_sess_add_by_psi(smf_ue_t *smf_ue, uint8_t psi)
+     ogs_assert(smf_ue);
+     ogs_assert(psi != OGS_NAS_PDU_SESSION_IDENTITY_UNASSIGNED);
+ 
+-    ogs_pool_id_calloc(&smf_sess_pool, &sess);
+-    if (!sess) {
+-        ogs_error("Maximum number of session[%lld] reached",
+-            (long long)ogs_app()->pool.sess);
+-        return NULL;
++    if (index > 0) {
++        if (index > ogs_pool_size(&smf_sess_pool)) {
++            ogs_error("Invalid session index[%d]", index);
++            return NULL;
++        }
++        ogs_pool_id_calloc_node(&smf_sess_pool, &sess,
++                &smf_sess_pool.array[index - 1]);
++        if (!sess) {
++            ogs_error("Session index[%d] is not available", index);
++            return NULL;
++        }
++    } else {
++        ogs_pool_id_calloc(&smf_sess_pool, &sess);
++        if (!sess) {
++            ogs_error("Maximum number of session[%lld] reached",
++                (long long)ogs_app()->pool.sess);
++            return NULL;
++        }
+     }
+ 
+     /* SBI Features */
+@@ -1793,6 +1812,18 @@ smf_sess_t *smf_sess_add_by_psi(smf_ue_t *smf_ue, uint8_t psi)
+     return sess;
+ }
+ 
++smf_sess_t *smf_sess_add_by_psi(smf_ue_t *smf_ue, uint8_t psi)
++{
++    return sess_add_by_psi(smf_ue, psi, 0);
++}
++
++/* PANIC: contexto persistente. Sessão restaurada no mesmo índice */
++smf_sess_t *smf_sess_add_restored(smf_ue_t *smf_ue, uint8_t psi, int index)
++{
++    ogs_assert(index > 0);
++    return sess_add_by_psi(smf_ue, psi, index);
++}
++
+ smf_sess_t *smf_sess_add_by_sm_context(ogs_sbi_message_t *message)
+ {
+     smf_ue_t *smf_ue = NULL;
+@@ -2074,6 +2105,9 @@ void smf_sess_remove(smf_sess_t *sess)
+             sess->ipv4 ? OGS_INET_NTOP(&sess->ipv4->addr, buf1) : "",
+             sess->ipv6 ? OGS_INET6_NTOP(&sess->ipv6->addr, buf2) : "");
+ 
++    /* PANIC: persistent context. Session released (not on shutdown) */
++    smf_persistence_delete(sess);
++
+     ogs_list_remove(&smf_ue->sess_list, sess);
+ 
+     memset(&e, 0, sizeof(e));
+diff --git a/src/smf/context.h b/src/smf/context.h
+index 7345773dc..8222b124a 100644
+--- a/src/smf/context.h
++++ b/src/smf/context.h
+@@ -472,6 +472,13 @@ typedef struct smf_sess_s {
+      */
+     bool udm_registered;
+ 
++    /*
++     * PANIC: persistent context (phase 1b). The session was rebuilt from the
++     * database at start-up and its N4 session is not yet re-created in the
++     * UPF (done when the PFCP association comes up).
++     */
++    bool restored;
++
+     /* Serving PLMN ID & Home PLMN ID */
+     ogs_plmn_id_t serving_plmn_id;
+     ogs_plmn_id_t home_plmn_id;
+@@ -764,6 +771,7 @@ smf_sess_t *smf_sess_add_by_apn(smf_ue_t *smf_ue, char *apn, uint8_t rat_type);
+ smf_sess_t *smf_sess_add_by_sm_context(ogs_sbi_message_t *message);
+ smf_sess_t *smf_sess_add_by_pdu_session(ogs_sbi_message_t *message);
+ smf_sess_t *smf_sess_add_by_psi(smf_ue_t *smf_ue, uint8_t psi);
++smf_sess_t *smf_sess_add_restored(smf_ue_t *smf_ue, uint8_t psi, int index);
+ 
+ void smf_sess_select_upf(smf_sess_t *sess);
+ uint8_t smf_sess_set_ue_ip(smf_sess_t *sess);
+diff --git a/src/smf/gsm-sm.c b/src/smf/gsm-sm.c
+index aa2f26616..315125ce7 100644
+--- a/src/smf/gsm-sm.c
++++ b/src/smf/gsm-sm.c
+@@ -36,6 +36,7 @@
+ #include "ngap-path.h"
+ #include "fd-path.h"
+ #include "local-path.h"
++#include "persistence.h"
+ 
+ static uint8_t gtp_cause_from_diameter(uint8_t gtp_version,
+         const uint32_t dia_err, const uint32_t *dia_exp_err)
+@@ -963,6 +964,8 @@ void smf_gsm_state_operational(ogs_fsm_t *s, smf_event_t *e)
+ 
+     switch (e->h.id) {
+     case OGS_FSM_ENTRY_SIG:
++        /* PANIC: persistent context. The session is established */
++        smf_persistence_save(sess);
+         break;
+ 
+     case OGS_FSM_EXIT_SIG:
+@@ -1025,6 +1028,18 @@ void smf_gsm_state_operational(ogs_fsm_t *s, smf_event_t *e)
+ 
+         switch (pfcp_message->h.type) {
+         case OGS_PFCP_SESSION_ESTABLISHMENT_RESPONSE_TYPE:
++            /* PANIC: session restored from the persistent context: the UPF
++             * chose new TEIDs, read them as in a normal establishment */
++            if (sess->restored) {
++                sess->restored = false;
++                pfcp_cause = smf_5gc_n4_handle_session_establishment_response(
++                        sess, pfcp_xact,
++                        &pfcp_message->pfcp_session_establishment_response);
++                if (pfcp_cause != OGS_PFCP_CAUSE_REQUEST_ACCEPTED)
++                    ogs_error("[%d:%d] N4 re-creation failed [%d]",
++                            sess->smf_ue_id, sess->psi, pfcp_cause);
++                break;
++            }
+             if ((pfcp_xact->create_flags &
+                         OGS_PFCP_CREATE_RESTORATION_INDICATION)) {
+                 ogs_pfcp_session_establishment_response_t *rsp = NULL;
+diff --git a/src/smf/init.c b/src/smf/init.c
+index a0eb9015b..375a50166 100644
+--- a/src/smf/init.c
++++ b/src/smf/init.c
+@@ -26,6 +26,7 @@
+ #include "ogs-metrics.h"
+ #include "metrics/prometheus/json_pager.h"
+ #include "pdu-info.h"
++#include "persistence.h"
+ 
+ static ogs_thread_t *thread;
+ static void smf_main(void *data);
+@@ -88,6 +89,11 @@ int smf_initialize(void)
+ 
+     ogs_metrics_context_open(ogs_metrics_self());
+ 
++    /* PANIC: persistent context. Rebuild the sessions before the PFCP
++     * association (their N4 sessions are re-created when it comes up) */
++    rv = smf_persistence_restore();
++    if (rv != OGS_OK) return rv;
++
+     rv = smf_fd_init();
+     if (rv != 0) return OGS_ERROR;
+ 
+@@ -139,6 +145,10 @@ void smf_terminate(void)
+ {
+     if (!initialized) return;
+ 
++    /* PANIC: persistent context. Shutdown removes the sessions from RAM but
++     * does not release them: leave the database alone from here on */
++    smf_persistence_stop();
++
+     /* Daemon terminating */
+     event_termination();
+     ogs_thread_destroy(thread);
+diff --git a/src/smf/meson.build b/src/smf/meson.build
+index aab4e5c45..e2b66de48 100644
+--- a/src/smf/meson.build
++++ b/src/smf/meson.build
+@@ -114,6 +114,7 @@ libsmf_sources = files('''
+     local-path.c
+     metrics.c
+     pdu-info.c
++    persistence.c
+     ../../lib/metrics/prometheus/json_pager.c
+ '''.split())
+ 
+diff --git a/src/smf/npcf-handler.c b/src/smf/npcf-handler.c
+index c54347d47..9987d4a41 100644
+--- a/src/smf/npcf-handler.c
++++ b/src/smf/npcf-handler.c
+@@ -321,18 +321,8 @@ bool smf_npcf_smpolicycontrol_handle_create(
+         smf_sess_t *sess, ogs_sbi_stream_t *stream, ogs_sbi_message_t *recvmsg)
+ {
+     int rv;
+-    char buf1[OGS_ADDRSTRLEN];
+-    char buf2[OGS_ADDRSTRLEN];
+ 
+     smf_ue_t *smf_ue = NULL;
+-    smf_bearer_t *qos_flow = NULL;
+-    ogs_pfcp_pdr_t *dl_pdr = NULL;
+-    ogs_pfcp_pdr_t *ul_pdr = NULL;
+-    ogs_pfcp_pdr_t *cp2up_pdr = NULL;
+-    ogs_pfcp_pdr_t *up2cp_pdr = NULL;
+-    ogs_pfcp_far_t *dl_far = NULL;
+-    ogs_pfcp_far_t *up2cp_far = NULL;
+-    ogs_pfcp_qer_t *qer = NULL;
+ 
+     OpenAPI_sm_policy_decision_t *SmPolicyDecision = NULL;
+     OpenAPI_lnode_t *node = NULL;
+@@ -547,6 +537,41 @@ bool smf_npcf_smpolicycontrol_handle_create(
+         return false;
+     }
+ 
++    /* PANIC: QoS flow and PFCP rules (also used to restore a session) */
++    smf_sess_build_default_rules(sess);
++
++    ogs_assert(OGS_OK ==
++            smf_5gc_pfcp_send_session_establishment_request(sess, stream, 0));
++
++    return true;
++}
++
++/*
++ * PANIC: default QoS flow and PFCP rules of a 5GC session, from the session
++ * QoS/AMBR, the UE IP address and the features of the associated UPF. Split
++ * out of smf_npcf_smpolicycontrol_handle_create so that a session restored
++ * from the persistent context (phase 1b) gets exactly the same rules.
++ */
++void smf_sess_build_default_rules(smf_sess_t *sess)
++{
++    char buf1[OGS_ADDRSTRLEN];
++    char buf2[OGS_ADDRSTRLEN];
++
++    smf_ue_t *smf_ue = NULL;
++    smf_bearer_t *qos_flow = NULL;
++    ogs_pfcp_pdr_t *dl_pdr = NULL;
++    ogs_pfcp_pdr_t *ul_pdr = NULL;
++    ogs_pfcp_pdr_t *cp2up_pdr = NULL;
++    ogs_pfcp_pdr_t *up2cp_pdr = NULL;
++    ogs_pfcp_far_t *dl_far = NULL;
++    ogs_pfcp_far_t *up2cp_far = NULL;
++    ogs_pfcp_qer_t *qer = NULL;
++
++    ogs_assert(sess);
++    smf_ue = smf_ue_find_by_id(sess->smf_ue_id);
++    ogs_assert(smf_ue);
++    ogs_assert(sess->pfcp_node);
++
+     /* Remove all previous QoS flow */
+     smf_bearer_remove_all(sess);
+ 
+@@ -747,11 +772,6 @@ bool smf_npcf_smpolicycontrol_handle_create(
+ 
+     cp2up_pdr->precedence = OGS_PFCP_CP2UP_PDR_PRECEDENCE;
+     up2cp_pdr->precedence = OGS_PFCP_UP2CP_PDR_PRECEDENCE;
+-
+-    ogs_assert(OGS_OK ==
+-            smf_5gc_pfcp_send_session_establishment_request(sess, stream, 0));
+-
+-    return true;
+ }
+ 
+ bool smf_npcf_smpolicycontrol_handle_update_notify(
+diff --git a/src/smf/npcf-handler.h b/src/smf/npcf-handler.h
+index 7cc02c68c..cb14c8139 100644
+--- a/src/smf/npcf-handler.h
++++ b/src/smf/npcf-handler.h
+@@ -28,6 +28,7 @@ extern "C" {
+ 
+ bool smf_npcf_smpolicycontrol_handle_create(
+         smf_sess_t *sess, ogs_sbi_stream_t *stream, ogs_sbi_message_t *recvmsg);
++void smf_sess_build_default_rules(smf_sess_t *sess);
+ bool smf_npcf_smpolicycontrol_handle_update_notify(
+         smf_sess_t *sess, ogs_sbi_stream_t *stream, ogs_sbi_message_t *recvmsg);
+ bool smf_npcf_smpolicycontrol_handle_terminate_notify(
+diff --git a/src/smf/persistence.c b/src/smf/persistence.c
+new file mode 100644
+index 000000000..1888d9e88
+--- /dev/null
++++ b/src/smf/persistence.c
+@@ -0,0 +1,313 @@
++/*
++ * PANIC: persistent context of the SMF (phase 1b,
++ * notes/core/fase1b-contexto-persistente.md).
++ *
++ * Collection "smf_sessions", one document per (SUPI, PSI), written when a 5GC
++ * session becomes operational and deleted when it is removed. At start-up each
++ * session is rebuilt in the same pool slot (its index is the sm_context_ref the
++ * AMF kept) with the same UE IPv4 address, operational and deactivated; its
++ * QoS flow and PFCP rules are built and sent to the UPF when the PFCP
++ * association comes up (a plain Session Establishment: the UPF chooses new
++ * TEIDs, which the UE never sees, and returns them in the Created PDRs).
++ *
++ * Not stored: TEIDs, SEIDs, PCF/BSF/UDM associations (the UDM keeps the SMF
++ * registration in its database), the serving AMF instance id (NF instance ids
++ * change on every start; with none, discovery finds the AMF). Only IPv4
++ * sessions are restored.
++ */
++
++#include "persistence.h"
++#include "npcf-handler.h"
++#include "pfcp-path.h"
++
++#define SMF_PERSISTENCE_COLLECTION "smf_sessions"
++
++/* On after the restore and off before terminating (shutdown removes the
++ * sessions from RAM, it does not release them) */
++static bool active = false;
++
++static mongoc_collection_t *collection(void)
++{
++    ogs_mongoc_t *mongoc = ogs_mongoc();
++
++    if (!mongoc || !mongoc->database)
++        return NULL;
++    return mongoc_database_get_collection(
++            mongoc->database, SMF_PERSISTENCE_COLLECTION);
++}
++
++static bool get_binary(const bson_iter_t *iter, void *data, size_t len)
++{
++    bson_subtype_t subtype;
++    uint32_t got = 0;
++    const uint8_t *bin = NULL;
++
++    if (!BSON_ITER_HOLDS_BINARY(iter))
++        return false;
++    bson_iter_binary(iter, &subtype, &got, &bin);
++    if (got != len)
++        return false;
++    memcpy(data, bin, len);
++    return true;
++}
++
++void smf_persistence_save(smf_sess_t *sess)
++{
++    mongoc_collection_t *coll = NULL;
++    bson_t *doc = NULL, *selector = NULL, *opts = NULL;
++    bson_error_t error;
++    smf_ue_t *smf_ue = NULL;
++
++    if (!active)
++        return;
++    ogs_assert(sess);
++    smf_ue = smf_ue_find_by_id(sess->smf_ue_id);
++    if (!smf_ue || !smf_ue->supi || sess->epc || !sess->session.name ||
++            sess->session.session_type != OGS_PDU_SESSION_TYPE_IPV4 ||
++            !sess->ipv4)
++        return;
++
++    coll = collection();
++    if (!coll)
++        return;
++
++    doc = bson_new();
++    BSON_APPEND_UTF8(doc, "supi", smf_ue->supi);
++    BSON_APPEND_INT32(doc, "psi", sess->psi);
++    BSON_APPEND_INT32(doc, "index", sess->index);
++    BSON_APPEND_UTF8(doc, "dnn", sess->session.name);
++    BSON_APPEND_INT32(doc, "sst", sess->s_nssai.sst);
++    BSON_APPEND_INT64(doc, "sd", sess->s_nssai.sd.v);
++    BSON_APPEND_INT32(doc, "session_type", sess->session.session_type);
++    BSON_APPEND_INT32(doc, "ssc_mode", sess->session.ssc_mode);
++    BSON_APPEND_BINARY(doc, "qos", BSON_SUBTYPE_BINARY,
++            (const uint8_t *)&sess->session.qos, sizeof(sess->session.qos));
++    BSON_APPEND_BINARY(doc, "ambr", BSON_SUBTYPE_BINARY,
++            (const uint8_t *)&sess->session.ambr, sizeof(sess->session.ambr));
++    BSON_APPEND_BINARY(doc, "ipv4", BSON_SUBTYPE_BINARY,
++            (const uint8_t *)sess->ipv4->addr, OGS_IPV4_LEN);
++
++    selector = BCON_NEW("supi", BCON_UTF8(smf_ue->supi),
++            "psi", BCON_INT32(sess->psi));
++    opts = BCON_NEW("upsert", BCON_BOOL(true));
++    if (!mongoc_collection_replace_one(
++                coll, selector, doc, opts, NULL, &error))
++        ogs_error("[%s:%d] persistence: %s",
++                smf_ue->supi, sess->psi, error.message);
++
++    bson_destroy(opts);
++    bson_destroy(selector);
++    bson_destroy(doc);
++    mongoc_collection_destroy(coll);
++}
++
++void smf_persistence_delete(smf_sess_t *sess)
++{
++    mongoc_collection_t *coll = NULL;
++    bson_t *selector = NULL;
++    bson_error_t error;
++    smf_ue_t *smf_ue = NULL;
++
++    if (!active)
++        return;
++    ogs_assert(sess);
++    smf_ue = smf_ue_find_by_id(sess->smf_ue_id);
++    if (!smf_ue || !smf_ue->supi || sess->epc)
++        return;
++
++    coll = collection();
++    if (!coll)
++        return;
++
++    selector = BCON_NEW("supi", BCON_UTF8(smf_ue->supi),
++            "psi", BCON_INT32(sess->psi));
++    if (!mongoc_collection_delete_one(coll, selector, NULL, NULL, &error))
++        ogs_error("[%s:%d] persistence: %s",
++                smf_ue->supi, sess->psi, error.message);
++
++    bson_destroy(selector);
++    mongoc_collection_destroy(coll);
++}
++
++void smf_persistence_stop(void)
++{
++    active = false;
++}
++
++/* One document -> one operational, deactivated session without N4 rules */
++static bool restore_one(const bson_t *doc)
++{
++    bson_iter_t iter;
++    smf_ue_t *smf_ue = NULL;
++    smf_sess_t *sess = NULL;
++    smf_event_t e;
++    const char *supi = NULL, *dnn = NULL;
++    int psi = 0, index = 0, session_type = 0, ssc_mode = 0;
++    uint8_t sst = 0;
++    uint32_t sd = OGS_S_NSSAI_NO_SD_VALUE;
++    ogs_qos_t qos;
++    ogs_bitrate_t ambr;
++    uint8_t ipv4[OGS_IPV4_LEN];
++    bool have_qos = false, have_ambr = false, have_ipv4 = false;
++
++    memset(&qos, 0, sizeof(qos));
++    memset(&ambr, 0, sizeof(ambr));
++
++    if (!bson_iter_init(&iter, doc))
++        return false;
++    while (bson_iter_next(&iter)) {
++        const char *k = bson_iter_key(&iter);
++
++        if (!strcmp(k, "supi") && BSON_ITER_HOLDS_UTF8(&iter))
++            supi = bson_iter_utf8(&iter, NULL);
++        else if (!strcmp(k, "psi"))
++            psi = bson_iter_as_int64(&iter);
++        else if (!strcmp(k, "index"))
++            index = bson_iter_as_int64(&iter);
++        else if (!strcmp(k, "dnn") && BSON_ITER_HOLDS_UTF8(&iter))
++            dnn = bson_iter_utf8(&iter, NULL);
++        else if (!strcmp(k, "sst"))
++            sst = bson_iter_as_int64(&iter);
++        else if (!strcmp(k, "sd"))
++            sd = bson_iter_as_int64(&iter);
++        else if (!strcmp(k, "session_type"))
++            session_type = bson_iter_as_int64(&iter);
++        else if (!strcmp(k, "ssc_mode"))
++            ssc_mode = bson_iter_as_int64(&iter);
++        else if (!strcmp(k, "qos"))
++            have_qos = get_binary(&iter, &qos, sizeof(qos));
++        else if (!strcmp(k, "ambr"))
++            have_ambr = get_binary(&iter, &ambr, sizeof(ambr));
++        else if (!strcmp(k, "ipv4"))
++            have_ipv4 = get_binary(&iter, ipv4, sizeof(ipv4));
++    }
++    if (!supi || !dnn || psi == OGS_NAS_PDU_SESSION_IDENTITY_UNASSIGNED ||
++            index <= 0 || session_type != OGS_PDU_SESSION_TYPE_IPV4 ||
++            !have_qos || !have_ambr || !have_ipv4) {
++        ogs_error("persistence: invalid session record");
++        return false;
++    }
++
++    smf_ue = smf_ue_find_by_supi((char *)supi);
++    if (!smf_ue)
++        smf_ue = smf_ue_add_by_supi((char *)supi);
++    if (!smf_ue)
++        return false;
++
++    sess = smf_sess_add_restored(smf_ue, psi, index);
++    if (!sess) {
++        ogs_error("[%s:%d] persistence: index %d not available",
++                supi, psi, index);
++        if (ogs_list_count(&smf_ue->sess_list) == 0)
++            smf_ue_remove(smf_ue);
++        return false;
++    }
++
++    sess->session.name = ogs_strdup(dnn);
++    ogs_assert(sess->session.name);
++    sess->s_nssai.sst = sst;
++    sess->s_nssai.sd.v = sd;
++    sess->session.session_type = session_type;
++    sess->session.ssc_mode = ssc_mode;
++    memcpy(&sess->session.qos, &qos, sizeof(qos));
++    memcpy(&sess->session.ambr, &ambr, sizeof(ambr));
++
++    /* The same UE IPv4 address, taken from the dynamic pool */
++    sess->ipv4 = ogs_pfcp_ue_ip_reserve(AF_INET, dnn, ipv4);
++    if (!sess->ipv4) {
++        ogs_error("[%s:%d] persistence: UE IPv4 address not available",
++                supi, psi);
++        smf_sess_remove(sess);
++        if (ogs_list_count(&smf_ue->sess_list) == 0)
++            smf_ue_remove(smf_ue);
++        return false;
++    }
++    sess->paa.session_type = session_type;
++    sess->paa.addr = sess->ipv4->addr[0];
++    ogs_hash_set(smf_self()->ipv4_hash, sess->ipv4->addr, OGS_IPV4_LEN, sess);
++
++    /* Established before the restart, now idle: the UDM still has the SMF
++     * registration (patch 0004 skips a new one on activation) */
++    sess->up_cnx_state = OpenAPI_up_cnx_state_DEACTIVATED;
++    sess->udm_registered = true;
++    sess->restored = true;
++
++    memset(&e, 0, sizeof(e));
++    e.sess_id = sess->id;
++    ogs_fsm_tran(&sess->sm, smf_gsm_state_operational, &e);
++
++    return true;
++}
++
++int smf_persistence_restore(void)
++{
++    mongoc_collection_t *coll = NULL;
++    mongoc_cursor_t *cursor = NULL;
++    const bson_t *doc = NULL;
++    bson_t *query = NULL;
++    bson_error_t error;
++    int restored = 0, failed = 0;
++
++    if (!smf_self()->persistence.enabled)
++        return OGS_OK;
++
++    coll = collection();
++    if (!coll) {
++        ogs_error("persistence: no database");
++        return OGS_ERROR;
++    }
++
++    query = bson_new();
++    cursor = mongoc_collection_find_with_opts(coll, query, NULL, NULL);
++    while (mongoc_cursor_next(cursor, &doc)) {
++        if (restore_one(doc))
++            restored++;
++        else
++            failed++;
++    }
++    if (mongoc_cursor_error(cursor, &error))
++        ogs_error("persistence: %s", error.message);
++
++    mongoc_cursor_destroy(cursor);
++    bson_destroy(query);
++    mongoc_collection_destroy(coll);
++
++    ogs_info("[persistence] %d PDU sessions restored (%d failed)",
++            restored, failed);
++
++    active = true;
++    return OGS_OK;
++}
++
++/* PFCP association up: re-create the N4 session of each restored session */
++void smf_persistence_reestablish(ogs_pfcp_node_t *node)
++{
++    smf_ue_t *smf_ue = NULL;
++    smf_sess_t *sess = NULL;
++    int n = 0;
++
++    ogs_assert(node);
++
++    ogs_list_for_each(&smf_self()->smf_ue_list, smf_ue) {
++        ogs_list_for_each(&smf_ue->sess_list, sess) {
++            if (!sess->restored)
++                continue;
++            if (!sess->pfcp_node)
++                smf_sess_select_upf(sess);
++            if (sess->pfcp_node != node)
++                continue;
++
++            /* Without the restoration flag: with it the UPF does not return
++             * the Created PDRs, and the TEIDs it chose are needed here (the
++             * old ones were not kept) */
++            smf_sess_build_default_rules(sess);
++            ogs_assert(OGS_OK ==
++                smf_5gc_pfcp_send_session_establishment_request(
++                    sess, NULL, 0));
++            n++;
++        }
++    }
++
++    if (n)
++        ogs_info("[persistence] %d N4 sessions re-created", n);
++}
+diff --git a/src/smf/persistence.h b/src/smf/persistence.h
+new file mode 100644
+index 000000000..a0efed65d
+--- /dev/null
++++ b/src/smf/persistence.h
+@@ -0,0 +1,31 @@
++/*
++ * PANIC: persistent context of the SMF (phase 1b).
++ *
++ * The stable part of each 5GC PDU session (identity, index = sm_context_ref,
++ * DNN, S-NSSAI, QoS, UE IPv4 address) is stored in the MongoDB of db_uri and
++ * rebuilt at start-up; its N4 session is re-created in the UPF when the PFCP
++ * association comes up. RAM stays the source of truth; the database is a
++ * copy read only at start-up.
++ */
++
++#ifndef SMF_PERSISTENCE_H
++#define SMF_PERSISTENCE_H
++
++#include "context.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++int smf_persistence_restore(void);
++void smf_persistence_reestablish(ogs_pfcp_node_t *node);
++void smf_persistence_stop(void);
++
++void smf_persistence_save(smf_sess_t *sess);
++void smf_persistence_delete(smf_sess_t *sess);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SMF_PERSISTENCE_H */
+diff --git a/src/smf/pfcp-sm.c b/src/smf/pfcp-sm.c
+index 6d44864a2..acb0a4de2 100644
+--- a/src/smf/pfcp-sm.c
++++ b/src/smf/pfcp-sm.c
+@@ -22,6 +22,7 @@
+ #include "local-path.h"
+ 
+ #include "n4-handler.h"
++#include "persistence.h"
+ 
+ static void pfcp_restoration(ogs_pfcp_node_t *node);
+ static void reselect_upf(ogs_pfcp_node_t *node);
+@@ -199,6 +200,10 @@ void smf_pfcp_state_associated(ogs_fsm_t *s, smf_event_t *e)
+             ogs_error("PFCP restoration");
+         }
+ 
++        /* PANIC: persistent context. Re-create the N4 sessions restored
++         * from the database (no-op if there are none) */
++        smf_persistence_reestablish(node);
++
+         smf_metrics_inst_global_inc(SMF_METR_GLOB_GAUGE_PFCP_PEERS_ACTIVE);
+         break;
+     case OGS_FSM_EXIT_SIG:
+diff --git a/src/smf/sbi-path.c b/src/smf/sbi-path.c
+index 0901ca944..c96f31d35 100644
+--- a/src/smf/sbi-path.c
++++ b/src/smf/sbi-path.c
+@@ -255,8 +255,11 @@ ogs_sbi_xact_t *smf_namf_comm_create_n1_n2_message_xact(
+ 
+     discovery_option = ogs_sbi_discovery_option_new();
+     ogs_assert(discovery_option);
+-    ogs_sbi_discovery_option_set_target_nf_instance_id(
+-            discovery_option, sess->amf_nf_id);
++    /* PANIC: a session restored from the persistent context has no serving
++     * AMF instance id (it changes on every start): discovery finds the AMF */
++    if (sess->amf_nf_id)
++        ogs_sbi_discovery_option_set_target_nf_instance_id(
++                discovery_option, sess->amf_nf_id);
+ 
+     xact = ogs_sbi_xact_add(
+             sess->id, &sess->sbi, OpenAPI_service_name_namf_comm,

@@ -4,6 +4,7 @@
 #   0007  desregisto implícito só 24 h depois de inalcançável (amf.time.implicit_deregistration)
 #   0008  0007 + o AMF responde "UE not reachable" em vez de fazer paging (amf.reachability)
 #   0009  0008 + o SMF manda o UPF deitar fora os pacotes guardados (smf.dl_buffering, DROBU)
+#   persist  0009 + contexto persistente no AMF e no SMF (fase 1b, patches 0010–0013, db_uri)
 # Os yaml de cada braço são cópias do amf.yaml da t3512-60s e do smf.yaml da baseline com as chaves
 # novas. Exige a imagem com os patches 0007–0009 (lab/patches/open5gs/).
 #

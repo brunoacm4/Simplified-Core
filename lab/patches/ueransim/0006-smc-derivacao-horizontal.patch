@@ -1,0 +1,82 @@
+Security Mode Command: derivação horizontal do K_AMF e contentor conforme a TS 33.501
+
+Três desvios do UERANSIM que impediam um K_AMF novo por Security Mode Command
+(K_AMF_change_flag), usado pelo contexto persistente do core (fase 1b):
+
+1. O K_AMF' era derivado com o contador de subida seguinte ao da última mensagem
+   enviada (o contexto já o incrementou ao protegê-la); a TS 33.501 (Anexo A.13 e
+   6.9.3) usa o contador da mensagem (do Registration Request). Agora usa
+   LastUsedUplinkCount().
+2. No Security Mode Complete de um Service Request, o contentor NAS levava o
+   Registration Request inicial: m_lastRegWithoutNsc fica true depois do registo
+   inicial e substituía o contentor em qualquer SMC. Agora só num registo.
+3. Com a chave nova os contadores voltam a zero, mas a lista dos últimos números
+   de sequência recebidos vinha da chave antiga: o Service Accept era descartado
+   como repetição. Agora a lista é limpa.
+
+Testado no lab (reinício do core com contexto persistente, 5 UEs): Service
+Request e registo periódico com K_AMF novo, sem autenticação nem mensagens
+descartadas.
+
+Commit 2f85361 no ramo panic/v3.3.0 do fork.
+
+diff --git a/src/ue/nas/mm/security.cpp b/src/ue/nas/mm/security.cpp
+index efd2369..a3bc67b 100644
+--- a/src/ue/nas/mm/security.cpp
++++ b/src/ue/nas/mm/security.cpp
+@@ -14,6 +14,20 @@
+ namespace nr::ue
+ {
+ 
++/*
++ * Contador de subida da última mensagem enviada (a mensagem inicial a que este Security Mode Command
++ * responde). Depois de proteger uma mensagem, o contexto já guarda o contador seguinte (countOnEncrypt),
++ * mas a TS 33.501 (Anexo A.13 e §6.9.3) deriva o K_AMF' com o contador usado no Registration Request.
++ */
++static NasCount LastUsedUplinkCount(const NasCount &next)
++{
++    NasCount count = next;
++    count.sqn = static_cast<uint8_t>(((int)next.sqn - 1) & 0xFF);
++    if ((int)next.sqn == 0)
++        count.overflow = octet2(((int)next.overflow - 1) & 0xFFFF);
++    return count;
++}
++
+ static bool IsValidKsi(const nas::IENasKeySetIdentifier &ngKsi)
+ {
+     return ngKsi.tsc == nas::ETypeOfSecurityContext::NATIVE_SECURITY_CONTEXT &&
+@@ -151,7 +165,8 @@ void NasMm::receiveSecurityModeCommand(const nas::SecurityModeCommand &msg)
+         // Before deriving the keys for temporary NAS security context, concern the horizontal derivation case
+         //  Because 33.501/6.9.3 says integrity check should be performed with the new key
+         if (horizontalDeriveNeeded)
+-            tmpCtx.keys.kAmf = keys::DeriveAmfPrimeInMobility(true, tmpCtx.uplinkCount, tmpCtx.keys.kAmf);
++            tmpCtx.keys.kAmf =
++                keys::DeriveAmfPrimeInMobility(true, LastUsedUplinkCount(tmpCtx.uplinkCount), tmpCtx.keys.kAmf);
+ 
+         keys::DeriveNasKeys(tmpCtx);
+ 
+@@ -200,9 +215,12 @@ void NasMm::receiveSecurityModeCommand(const nas::SecurityModeCommand &msg)
+     if (horizontalDeriveNeeded)
+     {
+         m_logger->debug("Performing kAMF' derivation from kAMF in mobility");
+-        nsCtx->keys.kAmf = keys::DeriveAmfPrimeInMobility(true, nsCtx->uplinkCount, nsCtx->keys.kAmf);
++        nsCtx->keys.kAmf =
++            keys::DeriveAmfPrimeInMobility(true, LastUsedUplinkCount(nsCtx->uplinkCount), nsCtx->keys.kAmf);
+         nsCtx->uplinkCount = {};
+         nsCtx->downlinkCount = {};
++        // Chave nova e contadores a zero: os números de sequência da chave antiga já não são repetições
++        nsCtx->lastNasSequenceNums.clear();
+     }
+ 
+     // Assign selected algorithms to security context, and derive NAS keys
+@@ -261,7 +279,9 @@ void NasMm::receiveSecurityModeCommand(const nas::SecurityModeCommand &msg)
+         else if (m_mmState == EMmState::MM_SERVICE_REQUEST_INITIATED && m_lastServiceRequest)
+             nas::EncodeNasMessage(*m_lastServiceRequest, resp.nasMessageContainer->data);
+     }
+-    if (m_lastRegWithoutNsc && m_lastRegistrationRequest)
++    // Só se este Security Mode Command responde a um registo: m_lastRegWithoutNsc fica true depois do registo
++    // inicial, e sem esta condição o contentor de um Service Request levava o Registration Request antigo
++    if (m_lastRegWithoutNsc && m_lastRegistrationRequest && m_mmState == EMmState::MM_REGISTERED_INITIATED)
+     {
+         resp.nasMessageContainer = nas::IENasMessageContainer{};
+         nas::EncodeNasMessage(*m_lastRegistrationRequest, resp.nasMessageContainer->data);
